@@ -64,11 +64,11 @@ display power between refreshes.
 ## 3. Build the server
 
 **Option A — Download (recommended).** Grab the prebuilt ARMv7 binary from
-[GitHub Releases](https://github.com/<owner>/<repo>/releases/latest):
+[GitHub Releases](https://github.com/Piszmog/esp32-calendar/releases/latest):
 
 ```bash
 curl -L -o calendar-display.tar.gz \
-  https://github.com/<owner>/<repo>/releases/latest/download/calendar-display_Linux_armv7.tar.gz
+  https://github.com/Piszmog/esp32-calendar/releases/latest/download/calendar-display_Linux_armv7.tar.gz
 tar -xzf calendar-display.tar.gz
 ```
 
@@ -76,9 +76,6 @@ The tarball contains `calendar-server`, `README.md`,
 `firmware/firebeetle_calendar/firebeetle_calendar.ino`,
 `firmware/firebeetle_calendar/secrets.h.example`, and
 `deploy/calendar.service`.
-
-> **Note:** replace `<owner>/<repo>` with the actual GitHub path once the repo
-> is published.
 
 **Option B — Build locally.** Install
 [goreleaser](https://goreleaser.com/install/), then from the repo root:
@@ -238,7 +235,7 @@ in a browser.
 ```bash
 # Download the latest release tarball
 curl -L -o /tmp/calendar.tar.gz \
-  https://github.com/<owner>/<repo>/releases/latest/download/calendar-display_Linux_armv7.tar.gz
+  https://github.com/Piszmog/esp32-calendar/releases/latest/download/calendar-display_Linux_armv7.tar.gz
 tar -xzf /tmp/calendar.tar.gz -C /tmp/
 
 # Stage to a temp name (never overwrite a running binary mid-transfer)

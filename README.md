@@ -5,6 +5,8 @@ ESP32-E that fetches a pre-rendered bitmap from a small Go server on a Raspberry
 
 ![Rendered calendar display](docs/demo.png)
 
+## How it works
+
 ```
                               HTTP fetch every 30 min
        ┌──────────────┐       (bat%, RSSI in query)         ┌────────────┐

@@ -1,0 +1,22 @@
+[Unit]
+Description=E-paper calendar server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=server
+WorkingDirectory=/home/server/calendar
+ExecStart=/home/server/calendar/calendar-server \
+  -listen :8080 \
+  -creds /home/server/calendar/credentials.json \
+  -token /home/server/calendar/token.json \
+  -tz America/Denver \
+  -fetch-interval 10m
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

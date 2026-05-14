@@ -1,0 +1,61 @@
+version: 2
+
+project_name: calendar-display
+dist: goreleaser-dist
+
+before:
+  hooks:
+    - sh -c "cd server && go mod download"
+
+builds:
+  - id: calendar-server
+    main: ./cmd/server
+    dir: ./server
+    binary: calendar-server
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+      - arm
+    goarm:
+      - "7"
+    ignore:
+      # No 32-bit ARM build for darwin
+      - goos: darwin
+        goarch: arm
+
+archives:
+  - formats: ['tar.gz']
+    # name_template makes OS/Arch compatible with results of `uname`.
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- title .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
+      {{- if .Arm }}v{{ .Arm }}{{ end }}
+    files:
+      - README.md
+      - firmware/firebeetle_calendar/firebeetle_calendar.ino
+      - firmware/firebeetle_calendar/secrets.h.example
+      - deploy/calendar.service
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+
+release:
+  footer: >-
+
+    ---
+
+    Released by [GoReleaser](https://github.com/goreleaser/goreleaser).

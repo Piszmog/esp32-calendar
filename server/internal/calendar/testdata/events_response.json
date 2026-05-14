@@ -1,0 +1,49 @@
+{
+  "kind": "calendar#events",
+  "summary": "Test Calendar",
+  "items": [
+    {
+      "id": "1",
+      "summary": "Timed Meeting",
+      "start": {"dateTime": "2025-06-01T10:00:00-07:00"},
+      "end":   {"dateTime": "2025-06-01T11:00:00-07:00"}
+    },
+    {
+      "id": "2",
+      "summary": "All Day Event",
+      "start": {"date": "2025-06-01"},
+      "end":   {"date": "2025-06-02"}
+    },
+    {
+      "id": "3",
+      "summary": "",
+      "start": {"dateTime": "2025-06-02T09:00:00-07:00"},
+      "end":   {"dateTime": "2025-06-02T10:00:00-07:00"}
+    },
+    {
+      "id": "4",
+      "summary": "Bad DateTime",
+      "start": {"dateTime": "not-a-valid-rfc3339-string"}
+    },
+    {
+      "id": "5",
+      "summary": "Future A",
+      "start": {"dateTime": "2025-06-05T14:00:00-07:00"}
+    },
+    {
+      "id": "6",
+      "summary": "Future B",
+      "start": {"dateTime": "2025-06-05T09:00:00-07:00"}
+    },
+    {
+      "id": "7",
+      "summary": "No Start Fields",
+      "start": {}
+    },
+    {
+      "id": "8",
+      "summary": "Another Timed",
+      "start": {"dateTime": "2025-06-03T14:00:00-07:00"}
+    }
+  ]
+}

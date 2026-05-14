@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(**/secrets.h)",
+      "Read(**/.secrets/**)",
+      "Bash(*secrets.h*)",
+      "Bash(*.secrets*)"
+    ]
+  }
+}

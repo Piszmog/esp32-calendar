@@ -1,0 +1,18 @@
+firmware/firebeetle_calendar/secrets.h
+
+# macOS metadata
+.DS_Store
+
+# Per-user Claude Code overrides (shared settings.json stays tracked)
+.claude/settings.local.json
+
+# OAuth secrets — defaults from -creds and -token flags in server/cmd/server/main.go
+credentials.json
+token.json
+.secrets/
+
+# Build artifacts
+server/calendar-server
+server/calendar-server-armv7
+server/dist/
+goreleaser-dist/

@@ -1,0 +1,73 @@
+version: "2"
+linters:
+  default: all
+  disable:
+    - canonicalheader
+    - depguard
+    - dupl
+    - gocyclo
+    - lll
+    - maintidx
+    - nlreturn
+    - noinlineerr
+    - revive
+    - varnamelen
+    - wsl
+    - wsl_v5
+  settings:
+    exhaustruct:
+      exclude:
+        - 'net/http\.Server'
+        - 'log/slog\.HandlerOptions'
+        - 'github\.com/golang/freetype/truetype\.Options'
+        - 'net\.ListenConfig'
+    tagliatelle:
+      case:
+        rules:
+          json: snake
+    ireturn:
+      allow:
+        - anon
+        - error
+        - empty
+        - stdlib
+        - 'golang.org/x/oauth2.TokenSource'
+        - 'golang.org/x/image/font.Face'
+  exclusions:
+    rules:
+      - linters:
+          - funlen
+          - maintidx
+        path: "_test\\.go"
+      - linters:
+          - exhaustruct
+        path: "_test\\.go"
+      - linters:
+          - err113
+        path: "_test\\.go"
+      - linters:
+          - gosec
+        text: "G304|G117"
+        path: "internal/calendar/auth\\.go"
+      - linters:
+          - gosec
+        text: "G703|G117|G306"
+        path: "_test\\.go"
+      - linters:
+          - gosmopolitan
+        path: "_test\\.go"
+      - linters:
+          - gochecknoglobals
+        path: "_test\\.go"
+      - linters:
+          - gochecknoglobals
+        text: "loadFonts"
+        path: "internal/calendar/render\\.go"
+      - linters:
+          - gosec
+        text: "G705|G114"
+        path: "internal/calendar/auth\\.go"
+      - linters:
+          - gosec
+        text: "G706"
+        path: "internal/calendar/server\\.go"

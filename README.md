@@ -3,6 +3,8 @@
 A Google Calendar display on a Waveshare 7.5" e-paper, driven by a FireBeetle 2
 ESP32-E that fetches a pre-rendered bitmap from a small Go server on a Raspberry Pi.
 
+![Rendered calendar display](docs/demo.png)
+
 ```
                               HTTP fetch every 30 min
        ┌──────────────┐       (bat%, RSSI in query)         ┌────────────┐

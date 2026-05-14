@@ -37,32 +37,32 @@ const (
 
 	// Font sizes.
 	fontSizeHeader      = 26.0
-	fontSizeSectionHead = 12.0
-	fontSizeBody        = 15.0
-	fontSizeWeekDay     = 14.0
-	fontSizeWeekSummary = 13.0
-	fontSizeWeekMore    = 10.0
+	fontSizeSectionHead = 14.0
+	fontSizeBody        = 18.0
+	fontSizeWeekDay     = 16.0
+	fontSizeWeekSummary = 15.0
+	fontSizeWeekMore    = 12.0
 	fontSizeFooter      = 14.0
 	fontDPI             = 72.0
 
 	// Chip (event pill) geometry.
-	chipH        = 30.0
-	chipGap      = 4.0
-	chipCorner   = 4.0
-	chipTimeX    = 12.0
-	chipTitleX   = 75.0
-	chipTextOffY = 6.0
-	chipMaxTitle = 42
+	chipH            = 36.0
+	chipGap          = 4.0
+	chipCorner       = 4.0
+	chipTimeX        = 12.0
+	chipTitleX       = 88.0
+	chipTextOffY     = 8.0
+	chipTitleRightPad = 12.0
 
 	// Section spacing.
-	sectionGapY     = 22.0
+	sectionGapY     = 24.0
 	tomorrowGap     = 10.0
 	weekHeaderGap   = 24.0
-	weekRowH        = 50.0
+	weekRowH        = 56.0
 	weekTextOffY    = 6.0
-	weekDashOffY    = 28.0
-	weekSummaryOffY = 24.0
-	weekMoreOffY    = 38.0
+	weekDashOffY    = 30.0
+	weekSummaryOffY = 26.0
+	weekMoreOffY    = 44.0
 
 	// Footer constants.
 	footerH           = 32.0
@@ -437,7 +437,7 @@ func drawFilledChip(dc *gg.Context, x, y, w, h float64, ev event) {
 	dc.SetFontFace(face(fontSizeBody, true))
 	drawTopLeft(dc, chipTimeString(ev), x+chipTimeX, y+chipTextOffY)
 	dc.SetFontFace(face(fontSizeBody, false))
-	drawTopLeft(dc, truncate(ev.Title, chipMaxTitle), x+chipTitleX, y+chipTextOffY)
+	drawTopLeft(dc, truncateToWidth(dc, ev.Title, w-chipTitleX-chipTitleRightPad), x+chipTitleX, y+chipTextOffY)
 	dc.SetRGB(0, 0, 0)
 }
 
@@ -449,7 +449,7 @@ func drawOutlinedChip(dc *gg.Context, x, y, w, h float64, ev event) {
 	dc.SetFontFace(face(fontSizeBody, true))
 	drawTopLeft(dc, chipTimeString(ev), x+chipTimeX, y+chipTextOffY)
 	dc.SetFontFace(face(fontSizeBody, false))
-	drawTopLeft(dc, truncate(ev.Title, chipMaxTitle), x+chipTitleX, y+chipTextOffY)
+	drawTopLeft(dc, truncateToWidth(dc, ev.Title, w-chipTitleX-chipTitleRightPad), x+chipTitleX, y+chipTextOffY)
 }
 
 func chipTimeString(ev event) string {
@@ -468,6 +468,25 @@ func truncate(s string, n int) string {
 		return ""
 	}
 	return string(runes[:n-1]) + "…"
+}
+
+// truncateToWidth returns s shortened (with a trailing "…") so it measures
+// no wider than maxW pixels in dc's current font face. Caller must
+// SetFontFace before invoking. Returns s unchanged if it already fits.
+func truncateToWidth(dc *gg.Context, s string, maxW float64) string {
+	if w, _ := dc.MeasureString(s); w <= maxW {
+		return s
+	}
+	const ellipsis = "…"
+	runes := []rune(s)
+	for len(runes) > 1 {
+		runes = runes[:len(runes)-1]
+		candidate := strings.TrimRight(string(runes), " ") + ellipsis
+		if w, _ := dc.MeasureString(candidate); w <= maxW {
+			return candidate
+		}
+	}
+	return ellipsis
 }
 
 func writePNG(w io.Writer, img image.Image) error {

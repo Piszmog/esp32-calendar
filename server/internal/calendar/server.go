@@ -91,6 +91,7 @@ func Run(cfg Config) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/calendar.bin", s.handleBin)
 	mux.HandleFunc("/calendar.png", s.handlePNG)
+	mux.HandleFunc("/calendar.demo.png", s.handleDemoPNG)
 	mux.HandleFunc("/healthz", s.handleHealth)
 
 	srv := &http.Server{
@@ -265,6 +266,41 @@ func (s *server) handlePNG(w http.ResponseWriter, r *http.Request) {
 	if err := writePNG(w, img); err != nil {
 		log.Printf("png write: %v", err)
 	}
+}
+
+func (s *server) handleDemoPNG(w http.ResponseWriter, r *http.Request) {
+	events, now := demoEvents(s.loc)
+	data := buildDisplayData(events, s.loc, demoDefaultBatPct, demoDefaultRSSI, now)
+	img, err := s.doRender(data)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", "image/png")
+	if err := writePNG(w, img); err != nil {
+		log.Printf("demo png write: %v", err)
+	}
+}
+
+// demoEvents returns a fixed, hardcoded event list and reference time for use
+// in the demo endpoint. The fixed date keeps the rendered PNG reproducible
+// across server restarts so the README screenshot stays stable.
+func demoEvents(loc *time.Location) ([]event, time.Time) {
+	now := time.Date(2026, 5, 13, 14, 30, 0, 0, loc)
+	return []event{
+		// Today — one long title to exercise chip truncation, one short
+		{Start: time.Date(2026, 5, 13, 15, 0, 0, 0, loc), End: time.Time{}, Title: "Architecture review with the platform team", AllDay: false},
+		{Start: time.Date(2026, 5, 13, 17, 30, 0, 0, loc), End: time.Time{}, Title: "Gym", AllDay: false},
+		// Tomorrow — one all-day + one timed
+		{Start: time.Date(2026, 5, 14, 0, 0, 0, 0, loc), End: time.Date(2026, 5, 15, 0, 0, 0, 0, loc), Title: "Conference Day 1", AllDay: true},
+		{Start: time.Date(2026, 5, 14, 11, 0, 0, 0, loc), End: time.Time{}, Title: "Lunch with Alex", AllDay: false},
+		// Week Ahead — Fri with 2 events (exercises multi-event summary), Mon, Tue all-day
+		{Start: time.Date(2026, 5, 15, 9, 0, 0, 0, loc), End: time.Time{}, Title: "1:1 Jamie", AllDay: false},
+		{Start: time.Date(2026, 5, 15, 14, 0, 0, 0, loc), End: time.Time{}, Title: "Design crit", AllDay: false},
+		{Start: time.Date(2026, 5, 18, 10, 0, 0, 0, loc), End: time.Time{}, Title: "Sprint planning", AllDay: false},
+		{Start: time.Date(2026, 5, 19, 0, 0, 0, 0, loc), End: time.Date(2026, 5, 20, 0, 0, 0, 0, loc), Title: "Holiday", AllDay: true},
+	}, now
 }
 
 func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {

@@ -93,6 +93,7 @@ func NewTestHandler(loc *time.Location, events []Event, fetchedAt time.Time) htt
 	mux := http.NewServeMux()
 	mux.HandleFunc("/calendar.bin", s.handleBin)
 	mux.HandleFunc("/calendar.png", s.handlePNG)
+	mux.HandleFunc("/calendar.demo.png", s.handleDemoPNG)
 	mux.HandleFunc("/healthz", s.handleHealth)
 	return mux
 }
@@ -116,6 +117,7 @@ func NewTestHandlerWithRenderer(
 	mux := http.NewServeMux()
 	mux.HandleFunc("/calendar.bin", s.handleBin)
 	mux.HandleFunc("/calendar.png", s.handlePNG)
+	mux.HandleFunc("/calendar.demo.png", s.handleDemoPNG)
 	mux.HandleFunc("/healthz", s.handleHealth)
 	return mux
 }

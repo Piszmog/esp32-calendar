@@ -16,4 +16,5 @@ token.json
 server/calendar-server
 server/calendar-server-armv7
 server/dist/
+server/server
 goreleaser-dist/

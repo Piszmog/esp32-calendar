@@ -150,6 +150,46 @@ func TestHandler_CalendarBin_SizeMismatch(t *testing.T) {
 	assert.Contains(t, string(body), "unexpected image size")
 }
 
+func TestHandler_DemoPNG_ValidImage(t *testing.T) {
+	t.Parallel()
+	ts := httptest.NewServer(testHandler(t))
+	defer ts.Close()
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, ts.URL+"/calendar.demo.png", nil)
+	require.NoError(t, err)
+	resp, err := ts.Client().Do(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, "image/png", resp.Header.Get("Content-Type"))
+
+	img, err := png.Decode(resp.Body)
+	require.NoError(t, err)
+	assert.Equal(t, 800, img.Bounds().Dx())
+	assert.Equal(t, 480, img.Bounds().Dy())
+}
+
+func TestHandler_DemoPNG_Deterministic(t *testing.T) {
+	t.Parallel()
+	ts := httptest.NewServer(testHandler(t))
+	defer ts.Close()
+
+	get := func() []byte {
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, ts.URL+"/calendar.demo.png", nil)
+		require.NoError(t, err)
+		resp, err := ts.Client().Do(req)
+		require.NoError(t, err)
+		defer func() { _ = resp.Body.Close() }()
+		b, _ := io.ReadAll(resp.Body)
+		return b
+	}
+
+	first := get()
+	second := get()
+	assert.Equal(t, first, second, "/calendar.demo.png should return identical bytes on repeated calls")
+}
+
 func TestHandler_CalendarBin_InvalidBat(t *testing.T) {
 	t.Parallel()
 	ts := httptest.NewServer(testHandler(t))

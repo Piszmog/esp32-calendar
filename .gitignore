@@ -10,6 +10,7 @@ firmware/firebeetle_calendar/secrets.h
 credentials.json
 token.json
 .secrets/
+!server/internal/calendar/testdata/credentials.json
 
 # Build artifacts
 server/calendar-server

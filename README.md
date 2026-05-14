@@ -272,6 +272,10 @@ gitignored and preserved across `git pull`.
 
 A 2000 mAh LiPo gets ~80 days between charges; a 5000 mAh battery gets 6+ months.
 
+## 9. Enclosure
+
+3D-printed case: [Weather Station E-Ink Frame](https://www.printables.com/model/1139047-weather-station-e-ink-frame).
+
 ## Troubleshooting
 
 | Symptom | First thing to check |

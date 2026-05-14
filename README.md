@@ -88,7 +88,7 @@ goreleaser release --snapshot --clean
 ```
 
 The ARMv7 binary lands at
-`goreleaser-dist/calendar-display_Linux_armv7/calendar-server`. Use this
+`goreleaser-dist/calendar-server_linux_arm_7/calendar-server`. Use this
 when iterating on the server code; for normal deploys, Option A is simpler.
 
 **Option C — Build on the Pi.**
@@ -105,7 +105,7 @@ cd server && go build -o calendar-server ./cmd/server
 ```bash
 ssh server@esp32-calendar.local "mkdir -p ~/calendar"
 
-scp goreleaser-dist/calendar-display_Linux_armv7/calendar-server \
+scp goreleaser-dist/calendar-server_linux_arm_7/calendar-server \
     server@esp32-calendar.local:~/calendar/calendar-server
 
 scp credentials.json        server@esp32-calendar.local:~/calendar/credentials.json
@@ -125,8 +125,10 @@ In that SSH session:
 ```bash
 cd ~/calendar
 chmod +x calendar-server
-./calendar-server -auth -tz America/Los_Angeles
+./calendar-server -auth -tz America/Denver
 ```
+
+> **Note:** the callback port defaults to `8090` and is configurable with `-auth-port`. Whatever port you use must match the redirect URI you registered in Google Cloud exactly.
 
 It prints an authorization URL. Open it in your **laptop's browser** (the tunnel
 handles the redirect). After approving:
@@ -188,12 +190,12 @@ Endpoints:
 1. Copy `firmware/firebeetle_calendar/secrets.h.example` →
    `firmware/firebeetle_calendar/secrets.h` and fill in:
    ```cpp
-   #define WIFI_SSID  "your-network"
-   #define WIFI_PASS  "your-password"
-   #define SERVER_HOST "192.168.1.50"  // Pi's static IP
+   const char* WIFI_SSID   = "your-network";
+   const char* WIFI_PASS   = "your-password";
+   const char* SERVER_HOST = "192.168.1.50";  // Pi's static IP
    ```
 2. Open `firmware/firebeetle_calendar/firebeetle_calendar.ino`. Edit
-   `SERVER_PORT` and `SLEEP_MINUTES` in the `USER CONFIG` block if needed.
+   `SERVER_PORT` in the `USER CONFIG` block if needed.
 3. **Tools → Board → DFRobot FireBeetle 2 ESP32-E** (or "ESP32 Dev Module").
 4. Select the serial port and click **Upload**.
 
@@ -222,7 +224,7 @@ On Apple Silicon you may need to approve it once under **System Settings → Pri
 | Timezone | `-tz` flag in `deploy/calendar.service` (or pass it at the command line) |
 | How often the server polls Google | `-fetch-interval` flag (default `10m`) |
 | Which calendar | `-calendar <calendar-id>` (default `primary`; find IDs in Google Calendar settings → "Integrate calendar") |
-| How often the display refreshes | `SLEEP_MINUTES` in the `.ino` `USER CONFIG` block |
+| How often the display refreshes | Fixed: aligns to the next :00/:30 wall-clock mark (≈30 min). To change the cadence, edit `nextWakeSeconds()` in the `.ino`. |
 | Past-event cutoff | `now.Add(-30 * time.Minute)` in `server/internal/calendar/render.go` |
 
 To preview layout changes without flashing: run the server locally with

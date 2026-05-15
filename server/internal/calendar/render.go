@@ -37,32 +37,35 @@ const (
 
 	// Font sizes.
 	fontSizeHeader      = 26.0
-	fontSizeSectionHead = 14.0
-	fontSizeBody        = 18.0
-	fontSizeWeekDay     = 16.0
-	fontSizeWeekSummary = 15.0
-	fontSizeWeekMore    = 12.0
+	fontSizeSectionHead = 20.0
+	fontSizeBody        = 20.0
+	fontSizeWeekDay     = 18.0
+	fontSizeWeekSummary = 18.0
+	fontSizeWeekMore    = 14.0
 	fontSizeFooter      = 14.0
 	fontDPI             = 72.0
 
 	// Chip (event pill) geometry.
-	chipH            = 36.0
-	chipGap          = 4.0
-	chipCorner       = 4.0
-	chipTimeX        = 12.0
-	chipTitleX       = 88.0
-	chipTextOffY     = 8.0
+	chipH             = 40.0
+	chipGap           = 4.0
+	chipCorner        = 4.0
+	chipTimeX         = 12.0
+	chipTitleX        = 96.0
+	chipTextOffY      = 9.0
 	chipTitleRightPad = 12.0
+	todayChipLineW    = 3.0
+	tomorrowChipLineW = 1.0
 
 	// Section spacing.
-	sectionGapY     = 24.0
-	tomorrowGap     = 10.0
-	weekHeaderGap   = 24.0
-	weekRowH        = 56.0
+	sectionGapY      = 30.0
+	sectionHeadRuleY = 24.0
+	tomorrowGap      = 10.0
+	weekHeaderGap    = 30.0
+	weekRowH        = 64.0
 	weekTextOffY    = 6.0
-	weekDashOffY    = 30.0
-	weekSummaryOffY = 26.0
-	weekMoreOffY    = 44.0
+	weekDashOffY    = 32.0
+	weekSummaryOffY = 30.0
+	weekMoreOffY    = 50.0
 
 	// Footer constants.
 	footerH           = 32.0
@@ -344,6 +347,9 @@ func drawTodayPanel(dc *gg.Context, d displayData, startY float64) float64 {
 	y := startY
 	dc.SetFontFace(face(fontSizeSectionHead, true))
 	drawTopLeft(dc, "TODAY", leftX, y)
+	dc.SetLineWidth(1)
+	dc.DrawLine(leftX, y+sectionHeadRuleY, leftX+leftW, y+sectionHeadRuleY)
+	dc.Stroke()
 	y += sectionGapY
 	if len(d.Today) == 0 {
 		dc.SetFontFace(face(fontSizeBody, false))
@@ -351,7 +357,7 @@ func drawTodayPanel(dc *gg.Context, d displayData, startY float64) float64 {
 		y += chipH + chipGap
 	} else {
 		for _, ev := range d.Today {
-			drawFilledChip(dc, leftX, y, leftW, chipH, ev)
+			drawChip(dc, leftX, y, leftW, chipH, ev, todayChipLineW)
 			y += chipH + chipGap
 		}
 	}
@@ -362,9 +368,12 @@ func drawTomorrowPanel(dc *gg.Context, d displayData, startY float64) {
 	y := startY
 	dc.SetFontFace(face(fontSizeSectionHead, true))
 	drawTopLeft(dc, "TOMORROW", leftX, y)
+	dc.SetLineWidth(1)
+	dc.DrawLine(leftX, y+sectionHeadRuleY, leftX+leftW, y+sectionHeadRuleY)
+	dc.Stroke()
 	y += sectionGapY
 	for _, ev := range d.Tomorrow {
-		drawOutlinedChip(dc, leftX, y, leftW, chipH, ev)
+		drawChip(dc, leftX, y, leftW, chipH, ev, tomorrowChipLineW)
 		y += chipH + chipGap
 	}
 	if len(d.Tomorrow) == 0 {
@@ -385,15 +394,15 @@ func drawWeekAheadPanel(dc *gg.Context, d displayData, contentTop float64) {
 		dc.SetFontFace(face(fontSizeWeekDay, true))
 		label := strings.ToUpper(ds.Date.Format("Mon")) + " " + ds.Date.Format("2")
 		drawTopLeft(dc, label, rightX, y+weekTextOffY)
-		dc.SetFontFace(face(fontSizeWeekSummary, false))
+		dc.SetFontFace(face(fontSizeWeekSummary, true))
 		if ds.Summary == "" {
 			drawTopLeft(dc, "—", rightX, y+weekDashOffY)
 		} else {
-			drawTopLeft(dc, ds.Summary, rightX, y+weekSummaryOffY)
+			drawTopLeft(dc, truncateToWidth(dc, ds.Summary, rightW), rightX, y+weekSummaryOffY)
 		}
 		if ds.More != "" {
 			dc.SetFontFace(face(fontSizeWeekMore, false))
-			drawTopLeft(dc, ds.More, rightX, y+weekMoreOffY)
+			drawTopLeft(dc, truncateToWidth(dc, ds.More, rightW), rightX, y+weekMoreOffY)
 		}
 		y += weekRowH
 	}
@@ -429,21 +438,9 @@ func drawTopLeft(dc *gg.Context, s string, x, y float64) {
 	dc.DrawStringAnchored(s, x, y, 0, 1)
 }
 
-func drawFilledChip(dc *gg.Context, x, y, w, h float64, ev event) {
+func drawChip(dc *gg.Context, x, y, w, h float64, ev event, lineW float64) {
 	dc.SetRGB(0, 0, 0)
-	dc.DrawRoundedRectangle(x, y, w, h, chipCorner)
-	dc.Fill()
-	dc.SetRGB(1, 1, 1)
-	dc.SetFontFace(face(fontSizeBody, true))
-	drawTopLeft(dc, chipTimeString(ev), x+chipTimeX, y+chipTextOffY)
-	dc.SetFontFace(face(fontSizeBody, false))
-	drawTopLeft(dc, truncateToWidth(dc, ev.Title, w-chipTitleX-chipTitleRightPad), x+chipTitleX, y+chipTextOffY)
-	dc.SetRGB(0, 0, 0)
-}
-
-func drawOutlinedChip(dc *gg.Context, x, y, w, h float64, ev event) {
-	dc.SetRGB(0, 0, 0)
-	dc.SetLineWidth(1)
+	dc.SetLineWidth(lineW)
 	dc.DrawRoundedRectangle(x, y, w, h, chipCorner)
 	dc.Stroke()
 	dc.SetFontFace(face(fontSizeBody, true))

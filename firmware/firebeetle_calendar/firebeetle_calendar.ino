@@ -171,7 +171,7 @@ bool fetchImage(uint8_t* buf, int batPct, int rssi) {
 }
 
 void drawBuffer(const uint8_t* buf) {
-    display.init(115200, true, 10, false);
+    display.init(115200, false, 2, false);
     display.setRotation(0);
     display.setFullWindow();
     display.firstPage();

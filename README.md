@@ -33,7 +33,14 @@ ESP32-E that fetches a pre-rendered bitmap from a small Go server on a Raspberry
 2. **APIs & Services → Enable APIs** → enable **Google Calendar API**.
 3. **OAuth consent screen** → External → fill in app name + your email.
    Add your own Google account to **Test users**.
-4. **Credentials → Create Credentials → OAuth client ID** → **Desktop app**.
+4. **Publish the app.** Still on the OAuth consent screen, click **Publish app**
+   and confirm. This sets publishing status to **Production**.
+   > **Why this matters:** apps left in **Testing** status issue refresh tokens
+   > that expire after **7 days**. An unattended display will silently stop
+   > updating after one week unless the app is published. For a personal,
+   > single-user app using only the Calendar read scope, Google does not require
+   > verification — you can publish immediately.
+5. **Credentials → Create Credentials → OAuth client ID** → **Desktop app**.
 5. After creation, **edit the client** and add this redirect URI exactly:
    ```
    http://127.0.0.1:8090/callback
@@ -134,8 +141,10 @@ handles the redirect). After approving:
 Auth complete. Token written to token.json
 ```
 
-`token.json` refreshes automatically — you shouldn't need to re-run this unless
-you revoke the app's access in Google.
+`token.json` refreshes automatically as long as the OAuth app is published to
+**Production** (see step 4 in section 1). If the app is left in **Testing**
+status, refresh tokens expire after 7 days and you will need to re-run this
+flow. You also need to re-run if you revoke the app's access in Google.
 
 ### Install the systemd unit
 
@@ -283,7 +292,7 @@ A 2000 mAh LiPo gets ~80 days between charges; a 5000 mAh battery gets 6+ months
 | OAuth `redirect_uri_mismatch` | The URI in Google Cloud must be exactly `http://127.0.0.1:8090/callback` — no `localhost`, no trailing slash |
 | Service won't start | `journalctl -u calendar -n 50 --no-pager` |
 | Server exits immediately | Bad `-tz` value or missing `credentials.json` — the server fails fast by design |
-| `token expired, refresh failed` in logs | OAuth token revoked — re-run the OAuth flow (section 4) |
+| `token expired, refresh failed` in logs | **First check:** OAuth app is still in **Testing** status — refresh tokens expire after 7 days. Publish the app to Production (section 1, step 4), then re-run the OAuth flow (section 4). If the app is already in Production, the token was revoked — just re-run the flow. |
 | Port 8080 unreachable from ESP32 | `sudo ufw status` on the Pi — allow port 8080 if a firewall is active |
 | Service starts but no image | Check `journalctl -u calendar` for fetch errors; confirm `token.json` exists in `~/calendar/` |
 | Serial shows WiFi failure / no IP | `WIFI_SSID` / `WIFI_PASS` in `firmware/firebeetle_calendar/secrets.h` |

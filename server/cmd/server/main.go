@@ -17,8 +17,7 @@ import (
 var version = "dev"
 
 const (
-	defaultFetchInterval  = 10 * time.Minute
-	defaultAuthListenPort = 8090
+	defaultFetchInterval = 10 * time.Minute
 )
 
 func main() {
@@ -27,13 +26,9 @@ func main() {
 
 	flag.BoolVar(&showVersion, "version", false, "Print version and exit")
 	flag.StringVar(&cfg.ListenAddr, "listen", ":8080", "HTTP listen address (use 127.0.0.1:PORT to restrict to loopback)")
-	flag.StringVar(&cfg.CredentialsPath, "creds", "credentials.json", "OAuth client secrets file")
-	flag.StringVar(&cfg.TokenPath, "token", "token.json", "OAuth token storage file")
-	flag.StringVar(&cfg.CalendarID, "calendar", "primary", "Google Calendar ID")
+	flag.StringVar(&cfg.ICalURL, "ical-url", "", "Secret iCal URL from Google Calendar settings")
 	flag.StringVar(&cfg.Timezone, "tz", "America/Los_Angeles", "IANA timezone, e.g. America/New_York")
-	flag.DurationVar(&cfg.FetchInterval, "fetch-interval", defaultFetchInterval, "How often to poll Google Calendar")
-	flag.BoolVar(&cfg.AuthMode, "auth", false, "Run OAuth flow and exit (first-time setup)")
-	flag.IntVar(&cfg.AuthListenPort, "auth-port", defaultAuthListenPort, "Local port for OAuth callback (when -auth)")
+	flag.DurationVar(&cfg.FetchInterval, "fetch-interval", defaultFetchInterval, "How often to poll the iCal feed")
 	flag.Parse()
 
 	if showVersion {
@@ -42,14 +37,6 @@ func main() {
 	}
 
 	log.Printf("calendar-server %s starting", version)
-
-	if cfg.AuthMode {
-		if err := calendar.RunAuth(cfg); err != nil {
-			log.Fatalf("auth failed: %v", err)
-		}
-		_, _ = fmt.Fprintln(os.Stdout, "Auth complete. Token written to", cfg.TokenPath)
-		return
-	}
 
 	if err := calendar.Run(cfg); err != nil {
 		log.Fatalf("run: %v", err)

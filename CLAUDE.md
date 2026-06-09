@@ -32,10 +32,7 @@ golangci-lint run                               # strict default: all config
 go test ./...                                   # must pass before any server/ change is considered done
 
 # Preview (run locally, visit http://localhost:8080/calendar.png)
-./calendar-server -listen :8080
-
-# First-time OAuth (requires SSH tunnel ssh -L 8090:127.0.0.1:8090 server@esp32-calendar.local)
-./calendar-server -auth -tz America/Los_Angeles
+./calendar-server -ical-url <your-secret-ical-url> -listen :8080
 
 # Release (primary): trigger the "Release" workflow in GitHub Actions
 #   Actions → Release → Run workflow → choose patch | minor | major
@@ -63,13 +60,13 @@ golangci-lint run
 
 ## Server package structure
 
-`internal/calendar` is the only package; it exports three things: `Config`, `Run`, `RunAuth`. All other types and functions are package-private.
+`internal/calendar` is the only package; it exports two things: `Config`, `Run`. All other types and functions are package-private.
 
 | File | Responsibility |
 |---|---|
 | `server.go` | `Config`, `Run`, `server` struct, HTTP handlers, refresh loop |
-| `auth.go` | `RunAuth`, OAuth token storage, `tokenSource` |
-| `fetch.go` | Google Calendar API client, `event` type, `fetchEvents` |
+| `fetch.go` | `event` type, `fetchEvents` dispatcher |
+| `fetch_ical.go` | iCal HTTP fetch, parse, and event filtering |
 | `render.go` | `buildDisplayData`, `renderImage`, DejaVu font embedding |
 | `icons.go` | WiFi bar and battery icon primitives |
 | `pack.go` | `pack1Bit`: RGBA → 1-bit MSB-first 48000-byte buffer |
@@ -95,7 +92,7 @@ a test file to `package calendar` — keep the blackbox boundary intact.
 
 - **Bitmap size is a hard protocol contract.** 800×480 = 48000 bytes. If you change `imgW`/`imgH` in `render.go`, you must also update `IMG_W`/`IMG_H` in the `.ino` and reflash the firmware. There is no version handshake — a size mismatch causes the ESP32 to skip the refresh.
 - **Pack convention is paired.** `pack1Bit` writes MSB-first, bit=1=white. The firmware reads it with `drawInvertedBitmap(..., GxEPD_BLACK)`, which paints black where the bit is 0. If either side changes this convention, the image inverts.
-- **Keep the export surface minimal.** `Config`, `Run`, `RunAuth` is intentional. Don't add exports unless `cmd/server` genuinely needs them.
+- **Keep the export surface minimal.** `Config`, `Run` is intentional. Don't add exports unless `cmd/server` genuinely needs them.
 - **Font `init()` panics on bad embed.** `render.go`'s `init()` calls `truetype.Parse` on the embedded TTFs and panics on failure. Don't remove the embedded font files.
 - **Past-event cutoff:** events starting more than 30 minutes ago are hidden. The constant is `now.Add(-30 * time.Minute)` in `render.go:buildDisplayData`.
 - **Startup is fail-fast.** `Run` validates timezone and performs an initial synchronous calendar fetch; a misconfiguration fails immediately rather than serving a stale image.

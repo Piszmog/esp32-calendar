@@ -14,7 +14,7 @@ ESP32-E that fetches a pre-rendered bitmap from a small Go server on a Raspberry
        │  Go server   │ ──────► 48000-byte 1-bit bitmap ──► │  ESP32-E   │
        │              │                                     │            │
        │ Google Cal   │                                     │ Waveshare  │
-       │  + OAuth     │                                     │ 7.5" EPD   │
+       │  iCal feed   │                                     │ 7.5" EPD   │
        └──────────────┘                                     └────────────┘
 ```
 
@@ -27,25 +27,25 @@ ESP32-E that fetches a pre-rendered bitmap from a small Go server on a Raspberry
 - USB cable for flashing the ESP32
 - Jumper wires
 
-## 1. Google Cloud setup (once)
+## 1. Get your calendar's secret iCal URL
 
-1. Go to <https://console.cloud.google.com/> and create a project.
-2. **APIs & Services → Enable APIs** → enable **Google Calendar API**.
-3. **OAuth consent screen** → External → fill in app name + your email.
-   Add your own Google account to **Test users**.
-4. **Publish the app.** Still on the OAuth consent screen, click **Publish app**
-   and confirm. This sets publishing status to **Production**.
-   > **Why this matters:** apps left in **Testing** status issue refresh tokens
-   > that expire after **7 days**. An unattended display will silently stop
-   > updating after one week unless the app is published. For a personal,
-   > single-user app using only the Calendar read scope, Google does not require
-   > verification — you can publish immediately.
-5. **Credentials → Create Credentials → OAuth client ID** → **Desktop app**.
-5. After creation, **edit the client** and add this redirect URI exactly:
+The server reads your calendar via a private iCal URL. No Google Cloud project,
+API keys, or OAuth setup is required.
+
+1. Open [Google Calendar](https://calendar.google.com) in a browser.
+2. Click the gear icon → **Settings**.
+3. In the left sidebar, under **Settings for my calendars**, click the calendar
+   you want to display.
+4. Scroll down to **Integrate calendar**.
+5. Copy the **"Secret address in iCal format"** link.
+   It looks like:
    ```
-   http://127.0.0.1:8090/callback
+   https://calendar.google.com/calendar/ical/<id>/private-<token>/basic.ics
    ```
-6. Download the JSON; rename it `credentials.json`.
+
+> **Keep this URL secret.** Anyone with the link can read your calendar events.
+> If it is ever exposed, rotate it by clicking **Reset** on the same Integrate
+> calendar page and updating the `-ical-url` flag in your service unit.
 
 ## 2. Wire the display
 
@@ -112,44 +112,31 @@ ssh server@esp32-calendar.local "mkdir -p ~/calendar"
 scp goreleaser-dist/calendar-server_linux_arm_7/calendar-server \
     server@esp32-calendar.local:~/calendar/calendar-server
 
-scp credentials.json        server@esp32-calendar.local:~/calendar/credentials.json
 scp deploy/calendar.service server@esp32-calendar.local:~/calendar/calendar.service
 ```
 
-### Run the one-time OAuth flow
-
-The OAuth callback must reach the Pi, so open an SSH port-forward first:
-
-```bash
-ssh -L 8090:127.0.0.1:8090 server@esp32-calendar.local
-```
-
-In that SSH session:
-
-```bash
-cd ~/calendar
-chmod +x calendar-server
-./calendar-server -auth -tz America/Denver
-```
-
-> **Note:** the callback port defaults to `8090` and is configurable with `-auth-port`. Whatever port you use must match the redirect URI you registered in Google Cloud exactly.
-
-It prints an authorization URL. Open it in your **laptop's browser** (the tunnel
-handles the redirect). After approving:
-
-```
-Auth complete. Token written to token.json
-```
-
-`token.json` refreshes automatically as long as the OAuth app is published to
-**Production** (see step 4 in section 1). If the app is left in **Testing**
-status, refresh tokens expire after 7 days and you will need to re-run this
-flow. You also need to re-run if you revoke the app's access in Google.
-
 ### Install the systemd unit
 
-Edit `~/calendar/calendar.service` on the Pi if you need a different `-tz` or
-`-fetch-interval`, then:
+Edit `~/calendar/calendar.service` on the Pi — set `-ical-url` to the secret
+iCal URL you copied in section 1, and update `-tz` to your timezone:
+
+```ini
+ExecStart=/home/server/calendar/calendar-server \
+  -listen :8080 \
+  -ical-url https://calendar.google.com/calendar/ical/<id>/private-<token>/basic.ics \
+  -tz America/Denver \
+  -fetch-interval 10m
+```
+
+> **Security note:** the iCal URL is a secret. Consider storing it in a
+> separate file readable only by the service user:
+> ```ini
+> EnvironmentFile=/home/server/calendar/calendar.env
+> # ExecStart uses ${ICAL_URL}
+> ```
+> and place `ICAL_URL=https://...` in `calendar.env` with `chmod 600`.
+
+Then install and start the service:
 
 ```bash
 sudo cp ~/calendar/calendar.service /etc/systemd/system/calendar.service
@@ -227,15 +214,15 @@ On Apple Silicon you may need to approve it once under **System Settings → Pri
 
 | What | Where |
 |------|-------|
-| Timezone | `-tz` flag in `deploy/calendar.service` (or pass it at the command line) |
-| How often the server polls Google | `-fetch-interval` flag (default `10m`) |
-| Which calendar | `-calendar <calendar-id>` (default `primary`; find IDs in Google Calendar settings → "Integrate calendar") |
+| Timezone | `-tz` flag in `deploy/calendar.service` |
+| How often the server polls the iCal feed | `-fetch-interval` flag (default `10m`) |
+| Which calendar | `-ical-url` — copy that calendar's **Secret address in iCal format** from Settings → Integrate calendar |
 | How often the display refreshes | Fixed: aligns to the next :00/:30 wall-clock mark (≈30 min). To change the cadence, edit `nextWakeSeconds()` in the `.ino`. |
 | Past-event cutoff | `now.Add(-30 * time.Minute)` in `server/internal/calendar/render.go` |
 
 To preview layout changes without flashing: run the server locally with
-`./calendar-server -listen :8080` and open `http://localhost:8080/calendar.png`
-in a browser.
+`./calendar-server -ical-url <your-url> -listen :8080` and open
+`http://localhost:8080/calendar.png` in a browser.
 
 ## 7. Updating
 
@@ -289,12 +276,10 @@ A 2000 mAh LiPo gets ~80 days between charges; a 5000 mAh battery gets 6+ months
 
 | Symptom | First thing to check |
 |---------|---------------------|
-| OAuth `redirect_uri_mismatch` | The URI in Google Cloud must be exactly `http://127.0.0.1:8090/callback` — no `localhost`, no trailing slash |
 | Service won't start | `journalctl -u calendar -n 50 --no-pager` |
-| Server exits immediately | Bad `-tz` value or missing `credentials.json` — the server fails fast by design |
-| `token expired, refresh failed` in logs | **First check:** OAuth app is still in **Testing** status — refresh tokens expire after 7 days. Publish the app to Production (section 1, step 4), then re-run the OAuth flow (section 4). If the app is already in Production, the token was revoked — just re-run the flow. |
+| Server exits immediately | Bad `-tz` value or missing/invalid `-ical-url` — the server fails fast by design |
+| `fetch ical: unexpected HTTP status` in logs | The secret iCal URL was reset or is wrong — re-copy it from Google Calendar → Settings → Integrate calendar and update the service unit |
 | Port 8080 unreachable from ESP32 | `sudo ufw status` on the Pi — allow port 8080 if a firewall is active |
-| Service starts but no image | Check `journalctl -u calendar` for fetch errors; confirm `token.json` exists in `~/calendar/` |
 | Serial shows WiFi failure / no IP | `WIFI_SSID` / `WIFI_PASS` in `firmware/firebeetle_calendar/secrets.h` |
 | Serial shows HTTP 404 or connection refused | `SERVER_HOST` wrong, or service not running — `systemctl status calendar` on the Pi |
 | ESP32 boots but display stays blank | Re-check wiring (section 2), or a pack/draw convention mismatch (see DEVELOPMENT.md) |

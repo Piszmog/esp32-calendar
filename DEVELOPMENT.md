@@ -11,8 +11,8 @@ esp32-calendar/
 │   ├── cmd/server/main.go      Flags, entrypoint
 │   └── internal/calendar/      The only package
 │       ├── server.go           Config, Run, HTTP handlers, refresh loop
-│       ├── auth.go             RunAuth, OAuth token storage, tokenSource
-│       ├── fetch.go            Google Calendar API client, event type, fetchEvents
+│       ├── fetch.go            event type, fetchEvents dispatcher
+│       ├── fetch_ical.go       iCal HTTP fetch, parse, and event filtering
 │       ├── render.go           buildDisplayData, renderImage, DejaVu font embedding
 │       ├── icons.go            WiFi bar and battery icon drawing
 │       ├── pack.go             pack1Bit: RGBA → 1-bit MSB-first 48000-byte buffer
@@ -26,8 +26,8 @@ esp32-calendar/
 └── CLAUDE.md                   Agent-side invariants (source of truth for Claude)
 ```
 
-The package exports exactly three things: `Config`, `Run`, `RunAuth`. Everything
-else is package-private.
+The package exports exactly two things: `Config`, `Run`. Everything else is
+package-private.
 
 ## Commands
 
@@ -56,10 +56,7 @@ golangci-lint run
 go test ./...
 
 # Preview (run locally, then visit http://localhost:8080/calendar.png)
-./calendar-server -listen :8080
-
-# OAuth flow (first-time setup — requires SSH tunnel: ssh -L 8090:127.0.0.1:8090 server@esp32-calendar.local)
-./calendar-server -auth -tz America/Los_Angeles
+./calendar-server -ical-url <your-secret-ical-url> -listen :8080
 ```
 
 ## Definition of done
@@ -120,8 +117,8 @@ interfaces — anyone on the LAN can fetch `/calendar.bin` (which contains event
 titles) or the PNG preview. Bind to `127.0.0.1:8080` and front with a reverse
 proxy if this is a concern.
 
-**Export surface is intentionally minimal.** `Config`, `Run`, `RunAuth` is the
-full public API. Don't add exports unless `cmd/server` genuinely needs them.
+**Export surface is intentionally minimal.** `Config`, `Run` is the full public
+API. Don't add exports unless `cmd/server` genuinely needs them.
 
 ## Cutting a release
 

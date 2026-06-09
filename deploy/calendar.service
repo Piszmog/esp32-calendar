@@ -9,8 +9,7 @@ User=server
 WorkingDirectory=/home/server/calendar
 ExecStart=/home/server/calendar/calendar-server \
   -listen :8080 \
-  -creds /home/server/calendar/credentials.json \
-  -token /home/server/calendar/token.json \
+  -ical-url https://calendar.google.com/calendar/ical/<id>/private-<token>/basic.ics \
   -tz America/Denver \
   -fetch-interval 10m
 Restart=on-failure

@@ -1,8 +1,8 @@
 package calendar_test
 
 import (
-	"os"
-	"path/filepath"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -14,82 +14,41 @@ import (
 
 func TestRun_Errors(t *testing.T) {
 	t.Parallel()
+
+	badICalSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "server error", http.StatusInternalServerError)
+	}))
+	t.Cleanup(badICalSrv.Close)
+
 	cases := []struct {
 		name       string
-		setup      func(t *testing.T) calendar.Config
+		cfg        calendar.Config
 		wantSubstr string
 	}{
 		{
 			"bad timezone",
-			func(t *testing.T) calendar.Config {
-				t.Helper()
-				return calendar.Config{
-					Timezone:        "Not/A/Timezone",
-					CredentialsPath: "/nonexistent",
-					TokenPath:       "/nonexistent",
-					ListenAddr:      ":0",
-					CalendarID:      testCalendarPrimary,
-					FetchInterval:   time.Minute,
-				}
+			calendar.Config{
+				Timezone:      "Not/A/Timezone",
+				ListenAddr:    ":0",
+				FetchInterval: time.Minute,
 			},
 			"invalid timezone",
 		},
 		{
-			"missing credentials",
-			func(t *testing.T) calendar.Config {
-				t.Helper()
-				return calendar.Config{
-					Timezone:        testTimezoneUTC,
-					CredentialsPath: filepath.Join(t.TempDir(), "nonexistent.json"),
-					TokenPath:       filepath.Join(t.TempDir(), "token.json"),
-					ListenAddr:      ":0",
-					CalendarID:      testCalendarPrimary,
-					FetchInterval:   time.Minute,
-				}
+			"ical server error",
+			calendar.Config{
+				Timezone:      testTimezoneUTC,
+				ListenAddr:    ":0",
+				FetchInterval: time.Minute,
+				ICalURL:       badICalSrv.URL,
 			},
-			"read ",
-		},
-		{
-			"malformed credentials",
-			func(t *testing.T) calendar.Config {
-				t.Helper()
-				credsPath := filepath.Join(t.TempDir(), "creds.json")
-				require.NoError(t, os.WriteFile(credsPath, []byte(`{invalid json}`), 0600))
-				return calendar.Config{
-					Timezone:        testTimezoneUTC,
-					CredentialsPath: credsPath,
-					TokenPath:       filepath.Join(t.TempDir(), "token.json"),
-					ListenAddr:      ":0",
-					CalendarID:      testCalendarPrimary,
-					FetchInterval:   time.Minute,
-				}
-			},
-			"parse credentials",
-		},
-		{
-			"missing token",
-			func(t *testing.T) calendar.Config {
-				t.Helper()
-				credsData, ioErr := os.ReadFile("testdata/credentials.json")
-				require.NoError(t, ioErr)
-				credsPath := filepath.Join(t.TempDir(), "creds.json")
-				require.NoError(t, os.WriteFile(credsPath, credsData, 0600))
-				return calendar.Config{
-					Timezone:        testTimezoneUTC,
-					CredentialsPath: credsPath,
-					TokenPath:       filepath.Join(t.TempDir(), "nonexistent-token.json"),
-					ListenAddr:      ":0",
-					CalendarID:      testCalendarPrimary,
-					FetchInterval:   time.Minute,
-				}
-			},
-			"read token (run with -auth first?)",
+			"fetch ical",
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			err := calendar.Run(tc.setup(t))
+			err := calendar.Run(tc.cfg)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tc.wantSubstr)
 		})

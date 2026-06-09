@@ -17,7 +17,6 @@ import (
 	"syscall"
 	"time"
 
-	"google.golang.org/api/option"
 )
 
 const (
@@ -37,17 +36,10 @@ const (
 // Config holds all runtime configuration. The zero value is not useful;
 // callers should populate every field (cmd/server does this from flags).
 type Config struct {
-	ListenAddr      string
-	CredentialsPath string
-	TokenPath       string
-	CalendarID      string
-	Timezone        string
-	FetchInterval   time.Duration
-	AuthMode        bool
-	AuthListenPort  int
-	// clientOpts are injected in tests to redirect the Calendar API to a
-	// local httptest.Server. Nil in production.
-	clientOpts []option.ClientOption
+	ListenAddr    string
+	ICalURL       string
+	Timezone      string
+	FetchInterval time.Duration
 }
 
 // server is the running HTTP service. It holds the most recent batch of

@@ -45,6 +45,7 @@ archives:
       - firmware/firebeetle_calendar/firebeetle_calendar.ino
       - firmware/firebeetle_calendar/secrets.h.example
       - deploy/calendar.service
+      - deploy/calendar.env.example
 
 changelog:
   sort: asc

@@ -57,6 +57,8 @@ go test ./...
 
 # Preview (run locally, then visit http://localhost:8080/calendar.png)
 ./calendar-server -ical-url <your-secret-ical-url> -listen :8080
+# or via env var (avoids the secret appearing in `ps`):
+ICAL_URL=<your-secret-ical-url> ./calendar-server -listen :8080
 ```
 
 ## Definition of done

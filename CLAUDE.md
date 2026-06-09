@@ -33,6 +33,8 @@ go test ./...                                   # must pass before any server/ c
 
 # Preview (run locally, visit http://localhost:8080/calendar.png)
 ./calendar-server -ical-url <your-secret-ical-url> -listen :8080
+# or via env var (deploy path — avoids the URL appearing in `ps`):
+ICAL_URL=<your-secret-ical-url> ./calendar-server -listen :8080
 
 # Release (primary): trigger the "Release" workflow in GitHub Actions
 #   Actions → Release → Run workflow → choose patch | minor | major
@@ -95,7 +97,8 @@ a test file to `package calendar` — keep the blackbox boundary intact.
 - **Keep the export surface minimal.** `Config`, `Run` is intentional. Don't add exports unless `cmd/server` genuinely needs them.
 - **Font `init()` panics on bad embed.** `render.go`'s `init()` calls `truetype.Parse` on the embedded TTFs and panics on failure. Don't remove the embedded font files.
 - **Past-event cutoff:** events starting more than 30 minutes ago are hidden. The constant is `now.Add(-30 * time.Minute)` in `render.go:buildDisplayData`.
-- **Startup is fail-fast.** `Run` validates timezone and performs an initial synchronous calendar fetch; a misconfiguration fails immediately rather than serving a stale image.
+- **Startup is fail-fast.** `Run` validates timezone, checks that `ICalURL` is non-empty (error: `ical URL required: set ICAL_URL env var or -ical-url flag`), then performs an initial synchronous calendar fetch; any misconfiguration fails immediately rather than serving a stale image.
+- **iCal URL is a bearer token.** In production, supply it via the `ICAL_URL` env var (sourced from a `chmod 600` `EnvironmentFile` in the systemd unit) — **not** as a `-ical-url` flag, which would be visible in `ps`. The flag is fine for local dev.
 - **No authentication on HTTP endpoints.** The default `-listen :8080` binds to all interfaces; anyone on the LAN can fetch `/calendar.bin` (which contains event titles) or the PNG preview. If this is a concern, bind to `127.0.0.1:8080` and front with a reverse proxy, or restrict firewall rules.
 
 ## Linter notes (`server/.golangci.yml`)

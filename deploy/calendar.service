@@ -7,9 +7,9 @@ Wants=network-online.target
 Type=simple
 User=server
 WorkingDirectory=/home/server/calendar
+EnvironmentFile=/home/server/calendar/calendar.env
 ExecStart=/home/server/calendar/calendar-server \
   -listen :8080 \
-  -ical-url https://calendar.google.com/calendar/ical/<id>/private-<token>/basic.ics \
   -tz America/Denver \
   -fetch-interval 10m
 Restart=on-failure

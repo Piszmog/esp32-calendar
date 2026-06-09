@@ -36,6 +36,10 @@ func main() {
 		return
 	}
 
+	if cfg.ICalURL == "" {
+		cfg.ICalURL = os.Getenv("ICAL_URL")
+	}
+
 	log.Printf("calendar-server %s starting", version)
 
 	if err := calendar.Run(cfg); err != nil {

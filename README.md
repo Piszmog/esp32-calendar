@@ -112,29 +112,41 @@ ssh server@esp32-calendar.local "mkdir -p ~/calendar"
 scp goreleaser-dist/calendar-server_linux_arm_7/calendar-server \
     server@esp32-calendar.local:~/calendar/calendar-server
 
-scp deploy/calendar.service server@esp32-calendar.local:~/calendar/calendar.service
+scp deploy/calendar.service     server@esp32-calendar.local:~/calendar/calendar.service
+scp deploy/calendar.env.example server@esp32-calendar.local:~/calendar/calendar.env.example
+```
+
+### Create the secret env file
+
+The iCal URL is a bearer token — the service reads it from `calendar.env`, a
+file that only the service user can read. **Never put the URL in the unit file
+itself**; unit files in `/etc/systemd/system/` are world-readable.
+
+```bash
+# On the Pi:
+cp ~/calendar/calendar.env.example ~/calendar/calendar.env
+chmod 600 ~/calendar/calendar.env
+# Edit calendar.env and replace the placeholder with your real iCal URL:
+nano ~/calendar/calendar.env
+```
+
+The file should look like:
+
+```sh
+ICAL_URL=https://calendar.google.com/calendar/ical/<id>/private-<token>/basic.ics
 ```
 
 ### Install the systemd unit
 
-Edit `~/calendar/calendar.service` on the Pi — set `-ical-url` to the secret
-iCal URL you copied in section 1, and update `-tz` to your timezone:
+Edit `~/calendar/calendar.service` on the Pi if you need to adjust `-tz` or
+`-fetch-interval`, then install:
 
 ```ini
 ExecStart=/home/server/calendar/calendar-server \
   -listen :8080 \
-  -ical-url https://calendar.google.com/calendar/ical/<id>/private-<token>/basic.ics \
   -tz America/Denver \
   -fetch-interval 10m
 ```
-
-> **Security note:** the iCal URL is a secret. Consider storing it in a
-> separate file readable only by the service user:
-> ```ini
-> EnvironmentFile=/home/server/calendar/calendar.env
-> # ExecStart uses ${ICAL_URL}
-> ```
-> and place `ICAL_URL=https://...` in `calendar.env` with `chmod 600`.
 
 Then install and start the service:
 
@@ -216,7 +228,7 @@ On Apple Silicon you may need to approve it once under **System Settings → Pri
 |------|-------|
 | Timezone | `-tz` flag in `deploy/calendar.service` |
 | How often the server polls the iCal feed | `-fetch-interval` flag (default `10m`) |
-| Which calendar | `-ical-url` — copy that calendar's **Secret address in iCal format** from Settings → Integrate calendar |
+| Which calendar | Set `ICAL_URL` in `~/calendar/calendar.env` to that calendar's **Secret address in iCal format** (Settings → Integrate calendar) |
 | How often the display refreshes | Fixed: aligns to the next :00/:30 wall-clock mark (≈30 min). To change the cadence, edit `nextWakeSeconds()` in the `.ino`. |
 | Past-event cutoff | `now.Add(-30 * time.Minute)` in `server/internal/calendar/render.go` |
 
@@ -277,8 +289,8 @@ A 2000 mAh LiPo gets ~80 days between charges; a 5000 mAh battery gets 6+ months
 | Symptom | First thing to check |
 |---------|---------------------|
 | Service won't start | `journalctl -u calendar -n 50 --no-pager` |
-| Server exits immediately | Bad `-tz` value or missing/invalid `-ical-url` — the server fails fast by design |
-| `fetch ical: unexpected HTTP status` in logs | The secret iCal URL was reset or is wrong — re-copy it from Google Calendar → Settings → Integrate calendar and update the service unit |
+| Server exits immediately | `ical URL required` → `ICAL_URL` not set in `calendar.env` or wrong path; `invalid timezone` → bad `-tz` value |
+| `fetch ical: unexpected HTTP status` in logs | The secret iCal URL was reset or is wrong — re-copy it from Google Calendar → Settings → Integrate calendar and update `calendar.env`, then `systemctl restart calendar` |
 | Port 8080 unreachable from ESP32 | `sudo ufw status` on the Pi — allow port 8080 if a firewall is active |
 | Serial shows WiFi failure / no IP | `WIFI_SSID` / `WIFI_PASS` in `firmware/firebeetle_calendar/secrets.h` |
 | Serial shows HTTP 404 or connection refused | `SERVER_HOST` wrong, or service not running — `systemctl status calendar` on the Pi |

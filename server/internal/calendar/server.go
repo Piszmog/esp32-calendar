@@ -19,6 +19,8 @@ import (
 
 )
 
+var errNoICalURL = errors.New("ical URL required: set ICAL_URL env var or -ical-url flag")
+
 const (
 	shutdownTimeout   = 5 * time.Second
 	httpReadTimeout   = 10 * time.Second
@@ -63,6 +65,9 @@ func Run(cfg Config) error {
 		return fmt.Errorf("invalid timezone %q: %w", cfg.Timezone, err)
 	}
 
+	if cfg.ICalURL == "" {
+		return errNoICalURL
+	}
 	s := &server{
 		cfg:      cfg,
 		loc:      loc,

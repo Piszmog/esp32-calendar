@@ -12,6 +12,9 @@ token.json
 .secrets/
 !server/internal/calendar/testdata/credentials.json
 
+# iCal secret env file — copy from deploy/calendar.env.example and chmod 600
+deploy/calendar.env
+
 # Build artifacts
 server/calendar-server
 server/calendar-server-armv7

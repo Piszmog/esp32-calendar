@@ -35,6 +35,16 @@ func TestRun_Errors(t *testing.T) {
 			"invalid timezone",
 		},
 		{
+			"missing ical url",
+			calendar.Config{
+				Timezone:      testTimezoneUTC,
+				ListenAddr:    ":0",
+				FetchInterval: time.Minute,
+				ICalURL:       "",
+			},
+			"ical URL required",
+		},
+		{
 			"ical server error",
 			calendar.Config{
 				Timezone:      testTimezoneUTC,

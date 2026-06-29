@@ -46,7 +46,7 @@ func fetchEventsIcal(ctx context.Context, url string, loc *time.Location) ([]eve
 // eventsFromCal extracts events in [timeMin, timeMax] from a parsed calendar,
 // expanding recurring events (RRULE/RDATE) into individual instances.
 func eventsFromCal(cal *ics.Calendar, loc *time.Location, timeMin, timeMax time.Time) []event {
-	overrides := collectRecurrenceOverrides(cal)
+	overrides := collectRecurrenceOverrides(cal, loc)
 	var out []event
 	for _, comp := range cal.Events() {
 		ev, ok := parseIcalEvent(comp, loc)
@@ -65,7 +65,7 @@ func eventsFromCal(cal *ics.Calendar, loc *time.Location, timeMin, timeMax time.
 // every VEVENT that carries a RECURRENCE-ID (i.e. an override for one specific
 // slot of a recurring series). The caller uses these to suppress the corresponding
 // base-series slots so the display shows the override instead of both.
-func collectRecurrenceOverrides(cal *ics.Calendar) map[string][]time.Time {
+func collectRecurrenceOverrides(cal *ics.Calendar, loc *time.Location) map[string][]time.Time {
 	m := make(map[string][]time.Time)
 	for _, comp := range cal.Events() {
 		if comp.GetProperty(ics.ComponentPropertyRecurrenceId) == nil {
@@ -79,7 +79,11 @@ func collectRecurrenceOverrides(cal *ics.Calendar) map[string][]time.Time {
 		if err != nil {
 			continue
 		}
-		m[uidProp.Value] = append(m[uidProp.Value], t)
+		// Normalize to loc so time.Equal matches rrule-go occurrences, which
+		// are generated in loc (from base.Start). golang-ical uses time.Local
+		// for floating datetimes; without this, ExDate silently fails to fire
+		// when time.Local != loc.
+		m[uidProp.Value] = append(m[uidProp.Value], t.In(loc))
 	}
 	return m
 }

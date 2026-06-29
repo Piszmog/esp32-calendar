@@ -338,3 +338,76 @@ END:VCALENDAR`
 	assert.Equal(t, 1, count, "non-recurring event must appear exactly once")
 	_ = eventTitles(events) // just to reference the helper
 }
+
+// TestExpandRecurring_RecurrenceIDOverride verifies that a RECURRENCE-ID override
+// VEVENT suppresses the original base-series slot and replaces it with the override.
+func TestExpandRecurring_RecurrenceIDOverride(t *testing.T) {
+	t.Parallel()
+
+	// Weekly standup for 3 weeks; the June 8 occurrence was moved to 2pm.
+	body := `BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+UID:standup-override@test
+SUMMARY:Weekly standup
+DTSTART:20260601T100000Z
+DTEND:20260601T103000Z
+RRULE:FREQ=WEEKLY;COUNT=3
+END:VEVENT
+BEGIN:VEVENT
+UID:standup-override@test
+SUMMARY:Weekly standup (moved)
+DTSTART:20260608T140000Z
+DTEND:20260608T143000Z
+RECURRENCE-ID:20260608T100000Z
+END:VEVENT
+END:VCALENDAR`
+
+	tMin := anchor
+	tMax := anchor.AddDate(0, 0, 21)
+	events := eventsFromICS(t, body, tMin, tMax)
+
+	// Expect 3 events: June 1 10am, June 8 2pm (override), June 15 10am.
+	assert.Len(t, events, 3, "should have 3 total events (no duplicate for June 8)")
+
+	// The original June 8 10am slot must be excluded.
+	orig := time.Date(2026, 6, 8, 10, 0, 0, 0, time.UTC)
+	for _, e := range events {
+		assert.False(t, e.Start.UTC().Equal(orig), "original June 8 10am slot must be suppressed by RECURRENCE-ID")
+	}
+
+	// The rescheduled June 8 2pm slot must be present.
+	moved := time.Date(2026, 6, 8, 14, 0, 0, 0, time.UTC)
+	found := false
+	for _, e := range events {
+		if e.Start.UTC().Equal(moved) {
+			found = true
+		}
+	}
+	assert.True(t, found, "rescheduled June 8 2pm override must appear")
+}
+
+// TestExpandRecurring_RRuleParseErrorFallback verifies that a malformed RRULE
+// falls back to the single DTSTART occurrence instead of silently dropping the event.
+func TestExpandRecurring_RRuleParseErrorFallback(t *testing.T) {
+	t.Parallel()
+
+	// RRULE with an unrecognised extension key causes StrToROption to fail.
+	body := `BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+UID:bad-rrule@test
+SUMMARY:Event with bad RRULE
+DTSTART:20260602T100000Z
+DTEND:20260602T110000Z
+RRULE:FREQ=WEEKLY;X-UNKNOWN=bad
+END:VEVENT
+END:VCALENDAR`
+
+	tMin := anchor
+	tMax := anchor.AddDate(0, 0, 14)
+	events := eventsFromICS(t, body, tMin, tMax)
+
+	count := countTitle(events, "Event with bad RRULE")
+	assert.Equal(t, 1, count, "malformed RRULE must fall back to DTSTART occurrence, not silently drop the event")
+}

@@ -46,6 +46,7 @@ func fetchEventsIcal(ctx context.Context, url string, loc *time.Location) ([]eve
 // eventsFromCal extracts events in [timeMin, timeMax] from a parsed calendar,
 // expanding recurring events (RRULE/RDATE) into individual instances.
 func eventsFromCal(cal *ics.Calendar, loc *time.Location, timeMin, timeMax time.Time) []event {
+	overrides := collectRecurrenceOverrides(cal)
 	var out []event
 	for _, comp := range cal.Events() {
 		ev, ok := parseIcalEvent(comp, loc)
@@ -55,21 +56,55 @@ func eventsFromCal(cal *ics.Calendar, loc *time.Location, timeMin, timeMax time.
 		if ev.Title == "" {
 			ev.Title = "(no title)"
 		}
-		out = append(out, expandRecurring(comp, ev, loc, timeMin, timeMax)...)
+		out = append(out, expandRecurring(comp, ev, loc, timeMin, timeMax, overrides)...)
 	}
 	return out
+}
+
+// collectRecurrenceOverrides returns a map of UID → original occurrence times for
+// every VEVENT that carries a RECURRENCE-ID (i.e. an override for one specific
+// slot of a recurring series). The caller uses these to suppress the corresponding
+// base-series slots so the display shows the override instead of both.
+func collectRecurrenceOverrides(cal *ics.Calendar) map[string][]time.Time {
+	m := make(map[string][]time.Time)
+	for _, comp := range cal.Events() {
+		if comp.GetProperty(ics.ComponentPropertyRecurrenceId) == nil {
+			continue
+		}
+		uidProp := comp.GetProperty(ics.ComponentPropertyUniqueId)
+		if uidProp == nil {
+			continue
+		}
+		t, err := comp.GetRecurrenceID()
+		if err != nil {
+			continue
+		}
+		m[uidProp.Value] = append(m[uidProp.Value], t)
+	}
+	return m
 }
 
 // expandRecurring expands ev into all occurrences within [timeMin, timeMax].
 // For non-recurring events it performs the same window check as before. For
 // recurring events (RRULE and/or RDATE) it uses rrule-go and honours EXDATE.
-func expandRecurring(comp *ics.VEvent, base event, loc *time.Location, timeMin, timeMax time.Time) []event {
+// overrides maps UID → original occurrence times that have been overridden by a
+// RECURRENCE-ID VEVENT and must be excluded from the base-series expansion.
+func expandRecurring(comp *ics.VEvent, base event, loc *time.Location, timeMin, timeMax time.Time, overrides map[string][]time.Time) []event {
 	rruleProp := comp.GetProperty(ics.ComponentPropertyRrule)
 	rdates, _ := comp.GetRDates()
 	if rruleProp == nil && len(rdates) == 0 {
 		return nonRecurringInWindow(base, timeMin, timeMax)
 	}
-	set := buildRRuleSet(base.Start, rruleProp, rdates, comp)
+	var extraExdates []time.Time
+	if p := comp.GetProperty(ics.ComponentPropertyUniqueId); p != nil {
+		extraExdates = overrides[p.Value]
+	}
+	set, hasRules := buildRRuleSet(base.Start, rruleProp, rdates, comp, extraExdates)
+	if !hasRules {
+		// RRULE/RDATE failed to parse; fall back to the single DTSTART occurrence
+		// so the event is visible rather than silently disappearing.
+		return nonRecurringInWindow(base, timeMin, timeMax)
+	}
 	return expandOccurrences(set, base, loc, timeMin, timeMax)
 }
 
@@ -90,27 +125,35 @@ func nonRecurringInWindow(base event, timeMin, timeMax time.Time) []event {
 }
 
 // buildRRuleSet assembles an rrule.Set from the event's DTSTART, RRULE, RDATE,
-// and EXDATE properties.
-func buildRRuleSet(dtstart time.Time, rruleProp *ics.IANAProperty, rdates []time.Time, comp *ics.VEvent) rrule.Set {
+// and EXDATE properties, plus any extra EXDATE times from RECURRENCE-ID overrides.
+// Returns the set and whether at least one rule or RDATE was successfully added
+// (false means the RRULE failed to parse and no RDATEs exist — caller should fall back).
+func buildRRuleSet(dtstart time.Time, rruleProp *ics.IANAProperty, rdates []time.Time, comp *ics.VEvent, extraExdates []time.Time) (rrule.Set, bool) {
 	var set rrule.Set
 	set.DTStart(dtstart)
+	hasRules := false
 	if rruleProp != nil {
 		if opt, err := rrule.StrToROption(rruleProp.Value); err == nil {
 			opt.Dtstart = dtstart
 			if r, err2 := rrule.NewRRule(*opt); err2 == nil {
 				set.RRule(r)
+				hasRules = true
 			}
 		}
 	}
 	for _, t := range rdates {
 		set.RDate(t)
+		hasRules = true
 	}
 	if exdates, err := comp.GetExDates(); err == nil {
 		for _, t := range exdates {
 			set.ExDate(t)
 		}
 	}
-	return set
+	for _, t := range extraExdates {
+		set.ExDate(t)
+	}
+	return set, hasRules
 }
 
 // expandOccurrences queries set for occurrences within [timeMin, timeMax] and

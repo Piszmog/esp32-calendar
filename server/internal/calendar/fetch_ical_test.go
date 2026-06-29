@@ -53,15 +53,19 @@ func icalServer(t *testing.T, body string) *httptest.Server {
 	}))
 }
 
+// icsWindow is a fixed window that includes all icsFixture / icsWithTZID dates.
+var (
+	icsWindowMin = time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	icsWindowMax = time.Date(2026, 6, 15, 0, 0, 0, 0, time.UTC)
+)
+
 func TestFetchEventsIcal_TimedAndAllDay(t *testing.T) {
 	t.Parallel()
-	srv := icalServer(t, icsFixture)
-	t.Cleanup(srv.Close)
 
 	loc, err := time.LoadLocation("America/Los_Angeles")
 	require.NoError(t, err)
 
-	events, err := calendar.FetchEventsIcal(context.Background(), srv.URL, loc)
+	events, err := calendar.EventsFromICS(icsFixture, loc, icsWindowMin, icsWindowMax)
 	require.NoError(t, err)
 
 	// Filter to only the two fixture events by title.
@@ -85,13 +89,11 @@ func TestFetchEventsIcal_TimedAndAllDay(t *testing.T) {
 
 func TestFetchEventsIcal_TZID(t *testing.T) {
 	t.Parallel()
-	srv := icalServer(t, icsWithTZID)
-	t.Cleanup(srv.Close)
 
 	loc, err := time.LoadLocation("America/Los_Angeles")
 	require.NoError(t, err)
 
-	events, err := calendar.FetchEventsIcal(context.Background(), srv.URL, loc)
+	events, err := calendar.EventsFromICS(icsWithTZID, loc, icsWindowMin, icsWindowMax)
 	require.NoError(t, err)
 
 	var meeting calendar.Event
@@ -104,6 +106,17 @@ func TestFetchEventsIcal_TZID(t *testing.T) {
 	assert.False(t, meeting.AllDay)
 	// 08:00 America/Los_Angeles
 	assert.Equal(t, 8, meeting.Start.Hour())
+}
+
+// TestFetchEventsIcal_HTTP verifies the HTTP fetch path parses a valid feed
+// without error (content assertions are handled in the ICS-level tests above).
+func TestFetchEventsIcal_HTTP(t *testing.T) {
+	t.Parallel()
+	srv := icalServer(t, icsFixture)
+	t.Cleanup(srv.Close)
+
+	_, err := calendar.FetchEventsIcal(context.Background(), srv.URL, time.UTC)
+	require.NoError(t, err)
 }
 
 func TestFetchEventsIcal_HTTP404(t *testing.T) {
@@ -141,4 +154,187 @@ END:VCALENDAR`
 	for _, e := range events {
 		assert.NotEqual(t, "Past event", e.Title)
 	}
+}
+
+// --- recurrence expansion tests ---
+
+// anchor is a fixed Monday used across recurrence test fixtures.
+// 2026-06-01 00:00:00 UTC is a Monday.
+var anchor = time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+
+func eventsFromICS(t *testing.T, body string, tMin, tMax time.Time) []calendar.Event {
+	t.Helper()
+	events, err := calendar.EventsFromICS(body, time.UTC, tMin, tMax)
+	require.NoError(t, err)
+	return events
+}
+
+func eventTitles(events []calendar.Event) []string {
+	seen := make(map[string]int)
+	for _, e := range events {
+		seen[e.Title]++
+	}
+	out := make([]string, 0, len(seen))
+	for title := range seen {
+		out = append(out, title)
+	}
+	return out
+}
+
+func countTitle(events []calendar.Event, title string) int {
+	n := 0
+	for _, e := range events {
+		if e.Title == title {
+			n++
+		}
+	}
+	return n
+}
+
+// TestExpandRecurring_WeeklyRRule verifies that a weekly recurring event
+// is expanded into multiple instances within the query window.
+func TestExpandRecurring_WeeklyRRule(t *testing.T) {
+	t.Parallel()
+
+	// DTSTART: 2026-06-01 10:00 UTC (Monday), RRULE repeats weekly for 4 weeks.
+	body := `BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+UID:weekly@test
+SUMMARY:Weekly standup
+DTSTART:20260601T100000Z
+DTEND:20260601T103000Z
+RRULE:FREQ=WEEKLY;COUNT=4
+END:VEVENT
+END:VCALENDAR`
+
+	// Window covers all 4 occurrences: 2026-06-01, 06-08, 06-15, 06-22.
+	tMin := anchor
+	tMax := anchor.AddDate(0, 0, 30)
+	events := eventsFromICS(t, body, tMin, tMax)
+
+	count := countTitle(events, "Weekly standup")
+	assert.Equal(t, 4, count, "expected 4 weekly occurrences in window")
+
+	// Each instance should preserve the correct time-of-day (10:00 UTC).
+	for _, e := range events {
+		if e.Title == "Weekly standup" {
+			assert.Equal(t, 10, e.Start.UTC().Hour())
+			assert.Equal(t, 30*time.Minute, e.End.Sub(e.Start), "duration must be preserved")
+		}
+	}
+}
+
+// TestExpandRecurring_RRuleStartsBeforeWindow verifies that a recurring event
+// whose DTSTART is before timeMin but whose recurrences fall inside the window
+// are still returned — this is the exact production bug.
+func TestExpandRecurring_RRuleStartsBeforeWindow(t *testing.T) {
+	t.Parallel()
+
+	// DTSTART: 2026-05-04 (one month before anchor). Repeats weekly, 8 times.
+	// Occurrences 2026-06-01 and 2026-06-08 fall inside the window.
+	body := `BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+UID:stale-start@test
+SUMMARY:Recurring from past
+DTSTART:20260504T090000Z
+DTEND:20260504T093000Z
+RRULE:FREQ=WEEKLY;COUNT=8
+END:VEVENT
+END:VCALENDAR`
+
+	tMin := anchor                    // 2026-06-01
+	tMax := anchor.AddDate(0, 0, 14) // 2026-06-15
+	events := eventsFromICS(t, body, tMin, tMax)
+
+	count := countTitle(events, "Recurring from past")
+	assert.Equal(t, 2, count, "expected 2 occurrences whose DTSTART pre-dates the window")
+}
+
+// TestExpandRecurring_ExDate verifies that EXDATE exclusions are honoured.
+func TestExpandRecurring_ExDate(t *testing.T) {
+	t.Parallel()
+
+	// Weekly standup for 4 weeks; 2026-06-08 is excluded.
+	body := `BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+UID:exdate@test
+SUMMARY:Standup with skip
+DTSTART:20260601T100000Z
+DTEND:20260601T103000Z
+RRULE:FREQ=WEEKLY;COUNT=4
+EXDATE:20260608T100000Z
+END:VEVENT
+END:VCALENDAR`
+
+	tMin := anchor
+	tMax := anchor.AddDate(0, 0, 30)
+	events := eventsFromICS(t, body, tMin, tMax)
+
+	count := countTitle(events, "Standup with skip")
+	assert.Equal(t, 3, count, "2026-06-08 must be excluded by EXDATE")
+
+	// Confirm the skipped date is absent.
+	skipped := time.Date(2026, 6, 8, 10, 0, 0, 0, time.UTC)
+	for _, e := range events {
+		if e.Title == "Standup with skip" {
+			assert.NotEqual(t, skipped, e.Start.UTC(), "EXDATE occurrence must not appear")
+		}
+	}
+}
+
+// TestExpandRecurring_AllDayRRule verifies that recurring all-day events
+// are expanded and preserve the AllDay flag.
+func TestExpandRecurring_AllDayRRule(t *testing.T) {
+	t.Parallel()
+
+	// All-day event, weekly, 3 occurrences.
+	body := `BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+UID:allday-recur@test
+SUMMARY:Weekly review
+DTSTART;VALUE=DATE:20260601
+DTEND;VALUE=DATE:20260602
+RRULE:FREQ=WEEKLY;COUNT=3
+END:VEVENT
+END:VCALENDAR`
+
+	tMin := anchor
+	tMax := anchor.AddDate(0, 0, 21)
+	events := eventsFromICS(t, body, tMin, tMax)
+
+	count := countTitle(events, "Weekly review")
+	assert.Equal(t, 3, count, "expected 3 all-day occurrences")
+	for _, e := range events {
+		if e.Title == "Weekly review" {
+			assert.True(t, e.AllDay, "recurring all-day events must keep AllDay=true")
+		}
+	}
+}
+
+// TestExpandRecurring_NonRecurringUnchanged verifies that an event without an
+// RRULE still yields exactly one instance (regression guard).
+func TestExpandRecurring_NonRecurringUnchanged(t *testing.T) {
+	t.Parallel()
+
+	body := `BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+UID:onetime@test
+SUMMARY:One-off meeting
+DTSTART:20260602T140000Z
+DTEND:20260602T150000Z
+END:VEVENT
+END:VCALENDAR`
+
+	tMin := anchor
+	tMax := anchor.AddDate(0, 0, 14)
+	events := eventsFromICS(t, body, tMin, tMax)
+
+	count := countTitle(events, "One-off meeting")
+	assert.Equal(t, 1, count, "non-recurring event must appear exactly once")
+	_ = eventTitles(events) // just to reference the helper
 }

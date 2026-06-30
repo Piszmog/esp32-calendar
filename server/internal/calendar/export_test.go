@@ -2,10 +2,14 @@ package calendar
 
 import (
 	"context"
+	"fmt"
 	"image"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
+
+	ics "github.com/arran4/golang-ical"
 )
 
 // RSSIUnknown exposes rssiUnknown so tests can assert the absent-param sentinel.
@@ -125,4 +129,23 @@ func (s *Server) Refresh(ctx context.Context) error { return s.refresh(ctx) }
 // Cached returns a copy of the currently cached events.
 func (s *Server) Cached() []Event {
 	return s.snapshot()
+}
+
+// ICalPropTimes wraps icalPropTimes for blackbox tests.
+func ICalPropTimes(prop *ics.IANAProperty, loc *time.Location) []time.Time {
+	return icalPropTimes(prop, loc)
+}
+
+// MaxRecurrenceOccurrences exposes the cap constant for assertion in tests.
+const MaxRecurrenceOccurrences = maxRecurrenceOccurrences
+
+// EventsFromICS parses an iCal string and returns events in [timeMin, timeMax],
+// expanding recurring events. Provides a deterministic test entry point for
+// eventsFromCal without depending on time.Now().
+func EventsFromICS(body string, loc *time.Location, timeMin, timeMax time.Time) ([]Event, error) {
+	cal, err := ics.ParseCalendar(strings.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("parse ical: %w", err)
+	}
+	return eventsFromCal(cal, loc, timeMin, timeMax), nil
 }

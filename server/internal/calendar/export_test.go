@@ -131,6 +131,14 @@ func (s *Server) Cached() []Event {
 	return s.snapshot()
 }
 
+// ICalPropTimes wraps icalPropTimes for blackbox tests.
+func ICalPropTimes(prop *ics.IANAProperty, loc *time.Location) []time.Time {
+	return icalPropTimes(prop, loc)
+}
+
+// MaxRecurrenceOccurrences exposes the cap constant for assertion in tests.
+const MaxRecurrenceOccurrences = maxRecurrenceOccurrences
+
 // EventsFromICS parses an iCal string and returns events in [timeMin, timeMax],
 // expanding recurring events. Provides a deterministic test entry point for
 // eventsFromCal without depending on time.Now().

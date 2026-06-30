@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -13,6 +15,12 @@ import (
 )
 
 var errICalBadStatus = errors.New("fetch ical: unexpected HTTP status")
+
+// maxRecurrenceOccurrences caps in-window results per VEVENT to bound memory
+// and output size for pathological rules (e.g. FREQ=SECONDLY with no COUNT/UNTIL).
+// Pre-window occurrences (before timeMin) are iterated but not counted toward
+// the cap, so recurring series with an old DTSTART are not incorrectly truncated.
+const maxRecurrenceOccurrences = 100_000
 
 // fetchEventsIcal fetches the iCal feed at url and returns events in the
 // window [now-1h, now+8d]. Recurring events (RRULE/RDATE) are expanded
@@ -68,22 +76,23 @@ func eventsFromCal(cal *ics.Calendar, loc *time.Location, timeMin, timeMax time.
 func collectRecurrenceOverrides(cal *ics.Calendar, loc *time.Location) map[string][]time.Time {
 	m := make(map[string][]time.Time)
 	for _, comp := range cal.Events() {
-		if comp.GetProperty(ics.ComponentPropertyRecurrenceId) == nil {
+		recurProp := comp.GetProperty(ics.ComponentPropertyRecurrenceId)
+		if recurProp == nil {
 			continue
 		}
 		uidProp := comp.GetProperty(ics.ComponentPropertyUniqueId)
 		if uidProp == nil {
 			continue
 		}
-		t, err := comp.GetRecurrenceID()
-		if err != nil {
+		// Parse via parseIcalTime (which uses loc for floating datetimes) so the
+		// resulting instant matches the rrule-go occurrences generated from DTSTART.
+		// golang-ical's GetRecurrenceID uses time.Local for floating datetimes, which
+		// produces the wrong UTC instant when time.Local != loc.
+		t, _, ok := parseIcalTime(recurProp, loc)
+		if !ok {
 			continue
 		}
-		// Normalize to loc so time.Equal matches rrule-go occurrences, which
-		// are generated in loc (from base.Start). golang-ical uses time.Local
-		// for floating datetimes; without this, ExDate silently fails to fire
-		// when time.Local != loc.
-		m[uidProp.Value] = append(m[uidProp.Value], t.In(loc))
+		m[uidProp.Value] = append(m[uidProp.Value], t)
 	}
 	return m
 }
@@ -95,7 +104,7 @@ func collectRecurrenceOverrides(cal *ics.Calendar, loc *time.Location) map[strin
 // RECURRENCE-ID VEVENT and must be excluded from the base-series expansion.
 func expandRecurring(comp *ics.VEvent, base event, loc *time.Location, timeMin, timeMax time.Time, overrides map[string][]time.Time) []event {
 	rruleProp := comp.GetProperty(ics.ComponentPropertyRrule)
-	rdates, _ := comp.GetRDates()
+	rdates := icalEventTimes(comp, ics.ComponentPropertyRdate, loc)
 	if rruleProp == nil && len(rdates) == 0 {
 		return nonRecurringInWindow(base, timeMin, timeMax)
 	}
@@ -103,10 +112,16 @@ func expandRecurring(comp *ics.VEvent, base event, loc *time.Location, timeMin, 
 	if p := comp.GetProperty(ics.ComponentPropertyUniqueId); p != nil {
 		extraExdates = overrides[p.Value]
 	}
-	set, hasRules := buildRRuleSet(base.Start, rruleProp, rdates, comp, extraExdates)
+	set, hasRules := buildRRuleSet(base.Start, rruleProp, rdates, comp, loc, extraExdates)
 	if !hasRules {
-		// RRULE/RDATE failed to parse; fall back to the single DTSTART occurrence
-		// so the event is visible rather than silently disappearing.
+		// RRULE/RDATE failed to parse; fall back to the single DTSTART occurrence.
+		// buildRRuleSet added EXDATEs to the now-discarded set, so re-check them
+		// here alongside extraExdates (RECURRENCE-ID overrides).
+		exdates := icalEventTimes(comp, ics.ComponentPropertyExdate, loc)
+		if slices.ContainsFunc(extraExdates, base.Start.Equal) ||
+			slices.ContainsFunc(exdates, base.Start.Equal) {
+			return nil
+		}
 		return nonRecurringInWindow(base, timeMin, timeMax)
 	}
 	return expandOccurrences(set, base, loc, timeMin, timeMax)
@@ -132,12 +147,14 @@ func nonRecurringInWindow(base event, timeMin, timeMax time.Time) []event {
 // and EXDATE properties, plus any extra EXDATE times from RECURRENCE-ID overrides.
 // Returns the set and whether at least one rule or RDATE was successfully added
 // (false means the RRULE failed to parse and no RDATEs exist — caller should fall back).
-func buildRRuleSet(dtstart time.Time, rruleProp *ics.IANAProperty, rdates []time.Time, comp *ics.VEvent, extraExdates []time.Time) (rrule.Set, bool) {
+func buildRRuleSet(dtstart time.Time, rruleProp *ics.IANAProperty, rdates []time.Time, comp *ics.VEvent, loc *time.Location, extraExdates []time.Time) (rrule.Set, bool) {
 	var set rrule.Set
 	set.DTStart(dtstart)
 	hasRules := false
 	if rruleProp != nil {
-		if opt, err := rrule.StrToROption(rruleProp.Value); err == nil {
+		// StrToROptionInLocation interprets non-Z UNTIL values in loc rather than
+		// UTC, matching the timezone used for DTSTART occurrences.
+		if opt, err := rrule.StrToROptionInLocation(rruleProp.Value, loc); err == nil {
 			opt.Dtstart = dtstart
 			if r, err2 := rrule.NewRRule(*opt); err2 == nil {
 				set.RRule(r)
@@ -149,10 +166,8 @@ func buildRRuleSet(dtstart time.Time, rruleProp *ics.IANAProperty, rdates []time
 		set.RDate(t)
 		hasRules = true
 	}
-	if exdates, err := comp.GetExDates(); err == nil {
-		for _, t := range exdates {
-			set.ExDate(t)
-		}
+	for _, t := range icalEventTimes(comp, ics.ComponentPropertyExdate, loc) {
+		set.ExDate(t)
 	}
 	for _, t := range extraExdates {
 		set.ExDate(t)
@@ -160,22 +175,34 @@ func buildRRuleSet(dtstart time.Time, rruleProp *ics.IANAProperty, rdates []time
 	return set, hasRules
 }
 
-// expandOccurrences queries set for occurrences within [timeMin, timeMax] and
-// returns one event instance per occurrence.
+// expandOccurrences iterates set for occurrences within [timeMin, timeMax] and
+// returns one event instance per occurrence. The iterator is pulled lazily so
+// the loop can stop as soon as occ exceeds timeMax. The cap applies only to
+// in-window results, so pre-window occurrences from an old DTSTART are iterated
+// freely without consuming the cap. The cap guards against pathological rules
+// that generate unbounded in-window results (e.g. FREQ=SECONDLY with no COUNT/UNTIL).
 func expandOccurrences(set rrule.Set, base event, loc *time.Location, timeMin, timeMax time.Time) []event {
 	dur := eventDuration(base)
-	// Widen the lower query bound by dur so an occurrence that started just
-	// before timeMin but is still ongoing is included.
-	queryMin := timeMin
-	if dur > 0 {
-		queryMin = timeMin.Add(-dur)
-	}
+	next := set.Iterator()
 	var out []event
-	for _, occ := range set.Between(queryMin, timeMax, true) {
-		if inst, ok := occurrenceInstance(base, occ, dur, loc, timeMin); ok {
+
+	for {
+		occ, more := next()
+		if !more {
+			break
+		}
+		if occ.After(timeMax) {
+			break
+		}
+		if inst, inWindow := occurrenceInstance(base, occ, dur, loc, timeMin); inWindow {
 			out = append(out, inst)
+			if len(out) >= maxRecurrenceOccurrences {
+				log.Printf("ical: occurrence cap (%d) reached for %q; truncating expansion", maxRecurrenceOccurrences, base.Title)
+				break
+			}
 		}
 	}
+
 	return out
 }
 
@@ -205,6 +232,55 @@ func occurrenceInstance(base event, occ time.Time, dur time.Duration, loc *time.
 		return inst, false
 	}
 	return inst, true
+}
+
+// icalPropTimes parses all datetime values from a single iCal property into
+// []time.Time, anchoring floating datetimes (no TZID, no Z) in loc. The
+// property value may be comma-separated (RFC 5545 §3.1). Entries that fail to
+// parse are silently skipped. This mirrors parseIcalTime but handles
+// comma-separated lists without constructing intermediate struct literals.
+func icalPropTimes(prop *ics.IANAProperty, loc *time.Location) []time.Time {
+	out := make([]time.Time, 0, strings.Count(prop.Value, ",")+1)
+	// Both VALUE and TZID are property-level attributes (RFC 5545 §3.2): they
+	// apply uniformly to all comma-separated tokens in prop.Value. Hoist them
+	// so neither is re-looked-up on every iteration.
+	valueDate := propValueIsDate(prop)
+	tzids := prop.ICalParameters["TZID"]
+	for raw := range strings.SplitSeq(prop.Value, ",") {
+		v := strings.TrimSpace(raw)
+		if v == "" {
+			continue
+		}
+		isAllDay := valueDate || !strings.Contains(v, "T")
+
+		var (
+			t  time.Time
+			ok bool
+		)
+		if isAllDay {
+			var err error
+			t, err = time.ParseInLocation("20060102", v, loc)
+			ok = err == nil
+		} else {
+			t, ok = parseIcalDatetime(v, tzids, loc)
+		}
+		if ok {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// icalEventTimes returns all datetime values for a given property across all
+// occurrences of that property on comp, anchored in loc. Handles repeated
+// properties and comma-separated values within each property.
+func icalEventTimes(comp *ics.VEvent, which ics.ComponentProperty, loc *time.Location) []time.Time {
+	props := comp.GetProperties(which)
+	out := make([]time.Time, 0, len(props))
+	for _, prop := range props {
+		out = append(out, icalPropTimes(prop, loc)...)
+	}
+	return out
 }
 
 // parseIcalEvent converts a VEVENT component into an event.
@@ -247,15 +323,19 @@ func parseIcalTime(prop *ics.IANAProperty, fallbackLoc *time.Location) (time.Tim
 	return t, false, ok
 }
 
+// propValueIsDate reports whether the VALUE=DATE parameter is explicitly set on
+// prop. Extracted from icalPropIsAllDay so it can be hoisted above per-token
+// loops (the VALUE parameter is property-level and constant across all tokens).
+func propValueIsDate(prop *ics.IANAProperty) bool {
+	return slices.ContainsFunc(prop.ICalParameters["VALUE"], func(p string) bool {
+		return strings.EqualFold(p, "DATE")
+	})
+}
+
 // icalPropIsAllDay reports whether a property represents an all-day date.
 // True when VALUE=DATE is set explicitly, or when the value has no time component.
 func icalPropIsAllDay(prop *ics.IANAProperty, value string) bool {
-	for _, v := range prop.ICalParameters["VALUE"] {
-		if strings.EqualFold(v, "DATE") {
-			return true
-		}
-	}
-	return !strings.Contains(value, "T")
+	return propValueIsDate(prop) || !strings.Contains(value, "T")
 }
 
 // parseIcalDatetime parses a DATETIME value (not all-day).

@@ -21,3 +21,4 @@ server/calendar-server-armv7
 server/dist/
 server/server
 goreleaser-dist/
+tmp/

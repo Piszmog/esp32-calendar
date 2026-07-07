@@ -92,6 +92,16 @@ bool connectWiFi() {
     return WiFi.status() == WL_CONNECTED;
 }
 
+const char* wifiStatusStr(wl_status_t status) {
+    switch (status) {
+        case WL_NO_SSID_AVAIL:   return "SSID not found";
+        case WL_CONNECT_FAILED:  return "auth failed (check password)";
+        case WL_CONNECTION_LOST: return "connection lost";
+        case WL_DISCONNECTED:    return "disconnected";
+        default:                 return "connect timed out";
+    }
+}
+
 // Read battery voltage on FireBeetle 2 ESP32-E (GPIO34, 1:2 divider).
 // Returns voltage in millivolts.
 uint32_t readBatteryMv() {
@@ -128,7 +138,7 @@ int batteryPercent(uint32_t mv) {
     return 0;
 }
 
-bool fetchImage(uint8_t* buf, int batPct, int rssi) {
+bool fetchImage(uint8_t* buf, int batPct, int rssi, char* reason, size_t reasonLen) {
     char url[160];
     snprintf(url, sizeof(url),
              "http://%s:%u/calendar.bin?bat=%d&rssi=%d",
@@ -138,23 +148,38 @@ bool fetchImage(uint8_t* buf, int batPct, int rssi) {
 
     HTTPClient http;
     http.setTimeout(20000);
-    if (!http.begin(url)) return false;
+    if (!http.begin(url)) {
+        snprintf(reason, reasonLen, "http.begin() failed");
+        Serial.println(reason);
+        return false;
+    }
 
     int code = http.GET();
     if (code != HTTP_CODE_OK) {
-        Serial.printf("HTTP %d\n", code);
+        if (code > 0) {
+            snprintf(reason, reasonLen, "HTTP %d", code);
+        } else {
+            snprintf(reason, reasonLen, "%s", http.errorToString(code).c_str());
+        }
+        Serial.println(reason);
         http.end();
         return false;
     }
     int len = http.getSize();
     if (len != (int)BUF_BYTES) {
-        Serial.printf("size %d, expected %u\n", len, BUF_BYTES);
+        snprintf(reason, reasonLen, "size %d, expected %u", len, BUF_BYTES);
+        Serial.println(reason);
         http.end();
         return false;
     }
 
     WiFiClient* s = http.getStreamPtr();
-    if (!s) { http.end(); return false; }
+    if (!s) {
+        snprintf(reason, reasonLen, "no stream");
+        Serial.println(reason);
+        http.end();
+        return false;
+    }
     uint32_t got = 0, t0 = millis();
     while (got < BUF_BYTES && millis() - t0 < 20000) {
         size_t avail = s->available();
@@ -167,6 +192,9 @@ bool fetchImage(uint8_t* buf, int batPct, int rssi) {
         }
     }
     http.end();
+    if (got != BUF_BYTES) {
+        snprintf(reason, reasonLen, "read %u/%u bytes (timeout)", got, BUF_BYTES);
+    }
     Serial.printf("read %u/%u bytes\n", got, BUF_BYTES);
     return got == BUF_BYTES;
 }
@@ -185,6 +213,26 @@ void drawBuffer(const uint8_t* buf) {
     display.hibernate();
 }
 
+void drawError(const char* title, const char* detail, const char* statusLine) {
+    display.init(115200, false, 2, false);
+    display.setRotation(0);
+    display.setFullWindow();
+    display.firstPage();
+    do {
+        display.fillScreen(GxEPD_WHITE);
+        display.setTextColor(GxEPD_BLACK);
+        display.setTextSize(3);
+        display.setCursor(20, 60);
+        display.print(title);
+        display.setTextSize(2);
+        display.setCursor(20, 140);
+        display.print(detail);
+        display.setCursor(20, 420);
+        display.print(statusLine);
+    } while (display.nextPage());
+    display.hibernate();
+}
+
 void setup() {
     Serial.begin(115200);
     delay(100);
@@ -197,6 +245,9 @@ void setup() {
 
     if (!connectWiFi()) {
         Serial.println("wifi failed");
+        char status[32];
+        snprintf(status, sizeof(status), "battery %d%%", batPct);
+        drawError("WiFi connect failed", wifiStatusStr(WiFi.status()), status);
         goToSleep(5ULL * 60ULL);
     }
     int rssi = WiFi.RSSI();
@@ -218,11 +269,15 @@ void setup() {
         goToSleep(5ULL * 60ULL);
     }
 
-    bool fetchOk = fetchImage(buf, batPct, rssi);
+    char reason[64];
+    bool fetchOk = fetchImage(buf, batPct, rssi, reason, sizeof(reason));
     if (fetchOk) {
         drawBuffer(buf);
     } else {
-        Serial.println("fetch failed — skipping refresh");
+        Serial.println("fetch failed — showing error screen");
+        char status[32];
+        snprintf(status, sizeof(status), "battery %d%%  rssi %d dBm", batPct, rssi);
+        drawError("Calendar fetch failed", reason, status);
     }
 
     free(buf);

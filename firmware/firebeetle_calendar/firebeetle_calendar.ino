@@ -28,6 +28,7 @@
 
 #include <WiFi.h>
 #include <HTTPClient.h>
+#include <ESPmDNS.h>
 #include <GxEPD2_BW.h>
 #include "esp_sleep.h"
 #include "esp_adc_cal.h"
@@ -200,6 +201,13 @@ void setup() {
     }
     int rssi = WiFi.RSSI();
     Serial.printf("rssi: %d dBm\n", rssi);
+
+    size_t hostLen = strlen(SERVER_HOST);
+    if (hostLen > 6 && strcmp(SERVER_HOST + hostLen - 6, ".local") == 0) {
+        if (!MDNS.begin("firebeetle-calendar")) {
+            Serial.println("mDNS init failed");
+        }
+    }
 
     configTime(0, 0, "pool.ntp.org", "time.google.com");
     for (int i = 0; i < 20 && time(nullptr) < 1704067200; i++) delay(100);

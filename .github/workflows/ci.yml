@@ -37,6 +37,31 @@ jobs:
       - name: Test
         run: go test ./...
         working-directory: server
+  firmware:
+    name: Firmware Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Create dummy secrets.h
+        run: |
+          cat > firmware/firebeetle_calendar/secrets.h <<'EOF'
+          #pragma once
+          const char* WIFI_SSID   = "ssid";
+          const char* WIFI_PASS   = "pass";
+          const char* SERVER_HOST = "example.local";
+          EOF
+      - name: Compile sketch
+        uses: arduino/compile-sketches@v1
+        with:
+          fqbn: esp32:esp32:dfrobot_firebeetle2_esp32e
+          platforms: |
+            - name: esp32:esp32
+              source-url: https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+          libraries: |
+            - name: GxEPD2
+            - name: Adafruit GFX Library
+          sketch-paths: |
+            - firmware/firebeetle_calendar
   release-dryrun:
     name: Release Dry Run
     runs-on: ubuntu-latest

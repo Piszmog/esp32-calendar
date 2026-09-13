@@ -5,5 +5,7 @@ const (
 	testTitleHello      = "hello"
 	testTitleHoliday    = "Holiday"
 	testTitleAbcdefghij = "Abcdefghij"
+	testTitleLater      = "Later"
+	testTitleEarlier    = "Earlier"
 	testTimezoneUTC     = "UTC"
 )

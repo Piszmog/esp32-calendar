@@ -259,8 +259,8 @@ func TestBuildDisplayData_WeekAheadSort(t *testing.T) {
 
 	// Two events on day+3 in reverse order.
 	events := []calendar.Event{
-		{Start: time.Date(2026, 5, 14, 15, 0, 0, 0, loc), Title: "Later"},
-		{Start: time.Date(2026, 5, 14, 9, 0, 0, 0, loc), Title: "Earlier"},
+		{Start: time.Date(2026, 5, 14, 15, 0, 0, 0, loc), Title: testTitleLater},
+		{Start: time.Date(2026, 5, 14, 9, 0, 0, 0, loc), Title: testTitleEarlier},
 	}
 
 	d := calendar.BuildDisplayData(events, loc, -1, 0, now)
@@ -311,20 +311,38 @@ func TestBuildDisplayData_EmptyEvents(t *testing.T) {
 	}
 }
 
+func TestBuildDisplayData_TodaySort(t *testing.T) {
+	t.Parallel()
+	loc := time.UTC
+	now := time.Date(2026, 5, 11, 8, 0, 0, 0, loc)
+	// Events in reverse order, plus an all-day event, to verify Today is
+	// sorted ascending by Start with the all-day event first.
+	events := []calendar.Event{
+		{Start: time.Date(2026, 5, 11, 15, 0, 0, 0, loc), Title: testTitleLater},
+		{Start: time.Date(2026, 5, 11, 9, 0, 0, 0, loc), Title: testTitleEarlier},
+		{Start: time.Date(2026, 5, 11, 0, 0, 0, 0, loc), Title: "All Day", AllDay: true},
+	}
+	d := calendar.BuildDisplayData(events, loc, -1, 0, now)
+	require.Len(t, d.Today, 3)
+	assert.Equal(t, "All Day", d.Today[0].Title)
+	assert.Equal(t, testTitleEarlier, d.Today[1].Title)
+	assert.Equal(t, testTitleLater, d.Today[2].Title)
+}
+
 func TestBuildDisplayData_TomorrowSort(t *testing.T) {
 	t.Parallel()
 	loc := time.UTC
 	now := time.Date(2026, 5, 11, 12, 0, 0, 0, loc)
 	// Events in reverse order to verify Tomorrow is sorted ascending by Start.
 	events := []calendar.Event{
-		{Start: time.Date(2026, 5, 12, 15, 0, 0, 0, loc), Title: "Later"},
-		{Start: time.Date(2026, 5, 12, 9, 0, 0, 0, loc), Title: "Earlier"},
+		{Start: time.Date(2026, 5, 12, 15, 0, 0, 0, loc), Title: testTitleLater},
+		{Start: time.Date(2026, 5, 12, 9, 0, 0, 0, loc), Title: testTitleEarlier},
 	}
 	d := calendar.BuildDisplayData(events, loc, -1, 0, now)
 	require.Len(t, d.Tomorrow, 2)
 	assert.True(t, d.Tomorrow[0].Start.Before(d.Tomorrow[1].Start))
-	assert.Equal(t, "Earlier", d.Tomorrow[0].Title)
-	assert.Equal(t, "Later", d.Tomorrow[1].Title)
+	assert.Equal(t, testTitleEarlier, d.Tomorrow[0].Title)
+	assert.Equal(t, testTitleLater, d.Tomorrow[1].Title)
 }
 
 func TestBuildDisplayData_NowField(t *testing.T) {

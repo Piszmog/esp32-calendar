@@ -210,7 +210,14 @@ func bucketTodayTomorrow(events []event, d *displayData, startOfToday, tomorrow,
 			d.Tomorrow = append(d.Tomorrow, ev)
 		}
 	}
-	sort.Slice(d.Tomorrow, func(i, j int) bool { return d.Tomorrow[i].Start.Before(d.Tomorrow[j].Start) })
+	byStart(d.Today)
+	byStart(d.Tomorrow)
+}
+
+// byStart orders events chronologically, soonest first. Stable so events
+// with equal Start keep their feed order across refreshes.
+func byStart(events []event) {
+	sort.SliceStable(events, func(i, j int) bool { return events[i].Start.Before(events[j].Start) })
 }
 
 func buildWeekAhead(events []event, startOfToday time.Time, loc *time.Location) []daySummary {
@@ -235,7 +242,7 @@ func buildWeekAhead(events []event, startOfToday time.Time, loc *time.Location) 
 	for offset := 2; offset <= 6; offset++ {
 		day := startOfToday.AddDate(0, 0, offset)
 		entries := weekDays[offset]
-		sort.Slice(entries, func(i, j int) bool { return entries[i].Start.Before(entries[j].Start) })
+		byStart(entries)
 		summary, more := summarizeDay(entries)
 		week = append(week, daySummary{
 			Date:    day,

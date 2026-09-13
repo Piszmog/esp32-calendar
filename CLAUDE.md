@@ -104,9 +104,9 @@ a test file to `package calendar` — keep the blackbox boundary intact.
 ## Linter notes (`server/.golangci.yml`)
 
 - `default: all` — every linter is on unless explicitly disabled.
-- `exhaustruct` is enabled — struct literals must fill all fields. Exceptions: `net/http.Cookie`, `net/http.Server`, `log/slog.HandlerOptions`.
+- `exhaustruct` is disabled — too much churn from third-party struct literals (`http.Server`, `truetype.Options`) and from its `v5` rename breaking config compatibility.
 - `tagliatelle` requires snake_case JSON tags.
-- `_test.go` files relax `funlen`, `maintidx`, `exhaustruct`, and `err113`.
+- `_test.go` files relax `funlen`, `maintidx`, and `err113`.
 
 ## Firmware (`firmware/firebeetle_calendar/firebeetle_calendar.ino`)
 

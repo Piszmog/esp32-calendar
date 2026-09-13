@@ -5,6 +5,8 @@ linters:
     - canonicalheader
     - depguard
     - dupl
+    - exhaustruct
+    - exhaustruct_v5
     - gocyclo
     - lll
     - maintidx
@@ -15,12 +17,6 @@ linters:
     - wsl
     - wsl_v5
   settings:
-    exhaustruct:
-      exclude:
-        - 'net/http\.Server'
-        - 'log/slog\.HandlerOptions'
-        - 'github\.com/golang/freetype/truetype\.Options'
-        - 'net\.ListenConfig'
     tagliatelle:
       case:
         rules:
@@ -38,9 +34,6 @@ linters:
       - linters:
           - funlen
           - maintidx
-        path: "_test\\.go"
-      - linters:
-          - exhaustruct
         path: "_test\\.go"
       - linters:
           - err113

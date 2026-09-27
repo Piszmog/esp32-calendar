@@ -47,6 +47,8 @@ jobs:
     steps:
       - uses: golang/govulncheck-action@v1
         with:
+          # Default 'stable' overrides go-version-file; scan the Go we ship.
+          go-version-input: ''
           go-version-file: server/go.mod
           cache-dependency-path: server/go.sum
           work-dir: server

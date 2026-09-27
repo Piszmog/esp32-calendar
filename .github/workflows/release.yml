@@ -136,7 +136,7 @@ jobs:
       contents: write
     # The tag already exists by now; without this a failed release leaves it
     # orphaned and the next run fails creating the same tag.
-    if: failure() && needs.release.result == 'failure'
+    if: always() && contains(fromJSON('["failure","cancelled"]'), needs.release.result)
     steps:
       - name: Delete release and tag
         run: |

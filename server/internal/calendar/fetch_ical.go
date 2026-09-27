@@ -201,7 +201,8 @@ func nonRecurringInWindow(base event, timeMin, timeMax time.Time) []event {
 	return []event{base}
 }
 
-// buildRRuleSet assembles an rrule.Set from the event's DTSTART, RRULE, RDATE,
+// buildRRuleSet assembles an rrule.Set from the event's DTSTART (always an
+// occurrence), RRULE, RDATE,
 // and EXDATE properties, plus any extra EXDATE times from RECURRENCE-ID overrides.
 // Returns the set and whether at least one rule or RDATE was successfully added
 // (false means the RRULE failed to parse and no RDATEs exist — caller should fall back).
@@ -221,6 +222,11 @@ func buildRRuleSet(dtstart time.Time, rruleProp *ics.IANAProperty, rdates []time
 	for _, t := range rdates {
 		set.RDate(t)
 		hasRules = true
+	}
+	// DTSTART is always the first instance (RFC 5545), even with only RDATEs
+	// or when it doesn't match the RRULE. Set dedups it when the rule matches.
+	if hasRules {
+		set.RDate(dtstart)
 	}
 	if exdates, err := comp.GetExDates(); err == nil {
 		for _, t := range exdates {

@@ -726,3 +726,50 @@ func TestEventsFromCal_TitleWhitespaceCollapsed(t *testing.T) {
 	require.Len(t, events, 1)
 	assert.Equal(t, "Line one Line two end", events[0].Title)
 }
+
+// TestEventsFromCal_DTStartIsFirstInstance verifies DTSTART counts as an
+// occurrence (RFC 5545) for RDATE-only events and when DTSTART doesn't match
+// the RRULE, without duplicating it when it does match.
+func TestEventsFromCal_DTStartIsFirstInstance(t *testing.T) {
+	t.Parallel()
+
+	body := `BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+UID:rdate-only@test
+SUMMARY:RDATE only
+DTSTART:20260602T100000Z
+DTEND:20260602T110000Z
+RDATE:20260604T100000Z
+END:VEVENT
+BEGIN:VEVENT
+UID:mismatch@test
+SUMMARY:Mismatch
+DTSTART:20260602T100000Z
+DTEND:20260602T110000Z
+RRULE:FREQ=WEEKLY;BYDAY=TH;COUNT=2
+END:VEVENT
+BEGIN:VEVENT
+UID:match@test
+SUMMARY:Match
+DTSTART:20260602T100000Z
+DTEND:20260602T110000Z
+RRULE:FREQ=WEEKLY;COUNT=2
+END:VEVENT
+END:VCALENDAR`
+	events := eventsFromICS(t, body, anchor, anchor.AddDate(0, 0, 30))
+
+	dtstart := time.Date(2026, 6, 2, 10, 0, 0, 0, time.UTC)
+	for _, title := range []string{"RDATE only", "Mismatch"} {
+		found := false
+		for _, e := range events {
+			if e.Title == title && e.Start.Equal(dtstart) {
+				found = true
+			}
+		}
+		assert.True(t, found, "%s: DTSTART instance missing", title)
+	}
+	assert.Equal(t, 2, countTitle(events, "RDATE only"))
+	assert.Equal(t, 3, countTitle(events, "Mismatch"))
+	assert.Equal(t, 2, countTitle(events, "Match"))
+}

@@ -119,6 +119,11 @@ void displayPower(bool on) {
     }
 }
 
+void wifiOff() {
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
+}
+
 void goToSleep(uint64_t seconds) {
     Serial.flush();
     esp_sleep_enable_timer_wakeup(seconds * 1000000ULL);
@@ -335,12 +340,11 @@ void drawError(const char* title, const char* detail, const char* statusLine) {
 void failAndSleep(const char* title, const char* detail, const char* statusLine) {
     if (rtcFailCount < UINT8_MAX) rtcFailCount++;
     Serial.printf("failure %u: %s: %s\n", rtcFailCount, title, detail);
+    wifiOff();   // before drawing: the radio isn't needed during the refresh
     if (rtcFailCount >= ERROR_SCREEN_AFTER && !rtcErrorShown) {
         drawError(title, detail, statusLine);
         rtcErrorShown = true;
     }
-    WiFi.disconnect(true);
-    WiFi.mode(WIFI_OFF);
     uint64_t sleepSecs = backoffSeconds(rtcFailCount);
     Serial.printf("sleeping %llus\n", sleepSecs);
     goToSleep(sleepSecs);
@@ -400,12 +404,11 @@ void setup() {
     if (!fetchImage(imgBuf, batPct, rssi, &wakeAtMs, reason, sizeof(reason))) {
         failAndSleep("Calendar fetch failed", reason, status);
     }
+    wifiOff();   // before drawing: the radio isn't needed during the refresh
     drawBuffer(imgBuf);
 
     rtcFailCount = 0;
     rtcErrorShown = false;
-    WiFi.disconnect(true);
-    WiFi.mode(WIFI_OFF);
     int32_t remainingMs = (int32_t)(wakeAtMs - millis());
     uint64_t sleepSecs = remainingMs > 1000 ? (uint64_t)remainingMs / 1000ULL : 1ULL;
     Serial.printf("sleeping %llus\n", sleepSecs);

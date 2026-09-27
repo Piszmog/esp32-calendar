@@ -45,7 +45,8 @@ API keys, or OAuth setup is required.
 
 > **Keep this URL secret.** Anyone with the link can read your calendar events.
 > If it is ever exposed, rotate it by clicking **Reset** on the same Integrate
-> calendar page and updating the `-ical-url` flag in your service unit.
+> calendar page, then updating `ICAL_URL` in `~/calendar/calendar.env` and
+> running `sudo systemctl restart calendar`.
 
 ## 2. Wire the display
 
@@ -65,8 +66,8 @@ Waveshare 7.5" V2 e-paper HAT → FireBeetle 2 ESP32-E:
 
 The PWR pin only exists on the **rev 2.3** Driver HAT. Older rev 2.2 HATs don't
 have it — skip that row. For extra battery savings you can connect PWR to a spare
-GPIO instead of 3V3 and pull it LOW before `esp_deep_sleep_start()` to fully cut
-display power between refreshes.
+GPIO instead of 3V3 and set `EPD_PWR` to that GPIO in the `.ino`; the firmware
+then powers the display only while drawing and holds PWR LOW during deep sleep.
 
 ## 3. Build the server
 
@@ -184,7 +185,7 @@ Endpoints:
 |-----|---------|
 | `http://<pi>:8080/calendar.png` | Preview in any browser |
 | `http://<pi>:8080/calendar.bin` | Packed 1-bit bitmap the ESP32 fetches |
-| `http://<pi>:8080/healthz`      | Plain-text health: 200 `ok`, or 503 `stale` after 3 fetch intervals without a successful fetch |
+| `http://<pi>:8080/healthz`      | Plain-text health: 200 `ok`, or 503 `stale` after 3 fetch intervals without a successful fetch. Also shows `device_last_seen_age` and `device_battery` from the ESP32's last check-in |
 
 ## 5. Flash the firmware
 
@@ -307,9 +308,11 @@ A 2000 mAh LiPo gets ~80 days between charges; a 5000 mAh battery gets 6+ months
 | Port 8080 unreachable from ESP32 | `sudo ufw status` on the Pi — allow port 8080 if a firewall is active |
 | Serial shows WiFi failure / no IP | `WIFI_SSID` / `WIFI_PASS` in `firmware/firebeetle_calendar/secrets.h` |
 | Serial shows HTTP 404 or connection refused | `SERVER_HOST` wrong, or service not running — `systemctl status calendar` on the Pi |
+| Did the ESP32 check in? | `journalctl -u calendar \| grep calendar.bin` — each request logs status, duration, and the reported `bat`/`rssi`; a `401` means `AUTH_TOKEN` differs between `calendar.env` and `secrets.h` |
 | ESP32 boots but display stays blank | Re-check wiring (section 2), or a pack/draw convention mismatch (see DEVELOPMENT.md) |
 | Image is inverted | In the firmware, swap `drawInvertedBitmap` → `drawBitmap` |
 | Display says "Battery low" | Charge the LiPo; the board re-checks every 2 hours and resumes on its own (press reset to resume immediately) |
-| Battery reads 0% always | Confirm your FireBeetle has the battery sense voltage divider on GPIO34 (some clones omit it); adjust calibration in `batteryPercent()` in the `.ino` |
+| Battery icon missing from the footer | The board read under 2.5 V on GPIO34, which means no battery sense divider (some clones omit it), so it doesn't report a battery level |
+| Battery reads 0% always | Adjust calibration in `batteryPercent()` in the `.ino` |
 | Battery icon obviously wrong | Adjust the LiPo curve in `batteryPercent()` in the `.ino` |
 | `arduino-cli` can't find the board | macOS CP2102 driver approval (see section 5); re-run `arduino-cli board list` |

@@ -94,35 +94,11 @@ file to `package calendar` — keep the blackbox boundary intact. Tests use
 
 ## Non-obvious invariants
 
-**Bitmap size is a hard protocol contract.** `800×480 / 8 = 48000 bytes`. If you
-change `imgW`/`imgH` in `render.go`, you must also update `IMG_W`/`IMG_H` in
-`firmware/firebeetle_calendar/firebeetle_calendar.ino` and reflash. There is no
-version handshake — a size mismatch causes the ESP32 to silently skip the refresh.
-
-**Pack convention is paired.** `pack1Bit` writes MSB-first, bit=1=white. The
-firmware reads with `drawInvertedBitmap(..., GxEPD_BLACK)`, which paints black
-where the bit is 0. If either side changes this convention, the image inverts.
-
-**Fonts panic on bad embed.** `render.go`'s `loadFonts` calls
-`truetype.Parse` on the embedded TTFs and panics on failure; `Run` calls it at
-startup. Don't remove the embedded font files under `internal/calendar/fonts/`.
-
-**Past-event cutoff.** Timed events starting more than 30 minutes ago are
-hidden unless they are still running (`End` in the future). The constant is
-`now.Add(-30 * time.Minute)` in `render.go:buildDisplayData`.
-
-**Startup is fail-fast.** `Run` validates the timezone and performs an initial
-synchronous calendar fetch; a misconfiguration fails immediately rather than
-serving a stale image.
-
-**HTTP auth is optional.** By default `-listen :8080` serves everything to the
-LAN, including `/calendar.bin` (event titles). Set `AUTH_TOKEN` in
-`calendar.env` and the same value in the firmware's `secrets.h` to require
-`Authorization: Bearer <token>` (or `?token=` for browser previews) on
-`/calendar.*`. `/healthz` stays open.
-
-**Export surface is intentionally minimal.** `Config`, `Run` is the full public
-API. Don't add exports unless `cmd/server` genuinely needs them.
+The protocol contracts, event-visibility rules, staleness, auth, wake
+schedule, and font-cache invariants are kept in one place:
+[CLAUDE.md → Non-obvious invariants](CLAUDE.md#non-obvious-invariants). Read
+that section before changing `render.go`, `fetch_ical.go`, `server.go`, or the
+firmware.
 
 ## Cutting a release
 
@@ -150,10 +126,13 @@ explicitly disabled. CI pins the golangci-lint version (in `ci.yml` and
 `release.yml`); Dependabot doesn't bump it, so update both by hand. The same
 goes for the GxEPD2 / Adafruit GFX versions in the firmware CI job.
 
-- **`exhaustruct`** — struct literals must fill all fields. Exceptions:
-  `net/http.Cookie`, `net/http.Server`, `log/slog.HandlerOptions`.
+- **`exhaustruct`** is disabled (third-party struct literals caused too much
+  churn).
 - **`tagliatelle`** — requires snake_case JSON tags.
-- **`_test.go` files** relax `funlen`, `maintidx`, `exhaustruct`, and `err113`.
+- **`_test.go` files** relax `funlen`, `maintidx`, `err113`, `gosmopolitan`,
+  `gochecknoglobals`, and a few `gosec` rules (G101, G117, G306, G703).
+- The config lists the few non-test exclusions; each has a comment or an
+  obvious scope. Don't add `//nolint` comments.
 
 ## Coordinated protocol changes
 

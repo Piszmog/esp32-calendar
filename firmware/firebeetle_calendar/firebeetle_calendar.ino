@@ -156,6 +156,11 @@ bool waitForWiFi(uint32_t timeoutMs) {
 bool connectWiFi() {
     WiFi.persistent(false);   // don't rewrite credentials to NVS flash every wake
     WiFi.mode(WIFI_STA);
+#ifdef STATIC_IP
+    // Skips DHCP, which otherwise keeps the radio on for another second or two.
+    WiFi.config(IPAddress(STATIC_IP), IPAddress(STATIC_GATEWAY),
+                IPAddress(STATIC_SUBNET), IPAddress(STATIC_DNS));
+#endif
     if (rtcChannel > 0) {
         WiFi.begin(WIFI_SSID, WIFI_PASS, rtcChannel, rtcBssid);
         if (waitForWiFi(8000)) return true;

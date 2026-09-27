@@ -7,7 +7,6 @@ import (
 	"calendar-display/internal/calendar"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 // TestPackRender_ProtocolContract verifies the 800×480 → 48000-byte invariant
@@ -25,8 +24,7 @@ func TestPackRender_ProtocolContract(t *testing.T) {
 	}
 
 	d := calendar.BuildDisplayData(events, loc, 72, -65, now)
-	img, err := calendar.RenderImage(d)
-	require.NoError(t, err)
+	img := calendar.RenderImage(d)
 
 	packed := calendar.Pack1Bit(img)
 	assert.Len(t, packed, 48000, "800×480 pixels must pack to exactly 48000 bytes")
@@ -37,8 +35,7 @@ func TestPackRender_WhiteBackground(t *testing.T) {
 	loc := time.UTC
 	now := time.Date(2026, 5, 11, 12, 0, 0, 0, loc)
 	d := calendar.BuildDisplayData(nil, loc, -1, 0, now)
-	img, err := calendar.RenderImage(d)
-	require.NoError(t, err)
+	img := calendar.RenderImage(d)
 
 	packed := calendar.Pack1Bit(img)
 

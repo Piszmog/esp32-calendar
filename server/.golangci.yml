@@ -8,6 +8,7 @@ linters:
     - exhaustruct
     - exhaustruct_v5
     - gocyclo
+    - gomodguard # deprecated; gomodguard_v2 runs via default: all
     - lll
     - maintidx
     - nlreturn
@@ -27,7 +28,6 @@ linters:
         - error
         - empty
         - stdlib
-        - 'golang.org/x/oauth2.TokenSource'
         - 'golang.org/x/image/font.Face'
   exclusions:
     rules:
@@ -38,10 +38,6 @@ linters:
       - linters:
           - err113
         path: "_test\\.go"
-      - linters:
-          - gosec
-        text: "G304|G117"
-        path: "internal/calendar/auth\\.go"
       - linters:
           - gosec
         text: "G703|G117|G306|G101"
@@ -58,9 +54,9 @@ linters:
         path: "internal/calendar/render\\.go"
       - linters:
           - gosec
-        text: "G705|G114"
-        path: "internal/calendar/auth\\.go"
-      - linters:
-          - gosec
         text: "G706"
         path: "internal/calendar/server\\.go"
+formatters:
+  enable:
+    - gofmt
+    - goimports

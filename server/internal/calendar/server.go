@@ -1,4 +1,4 @@
-// Package calendar fetches events from Google Calendar, renders them as a
+// Package calendar fetches events from an iCal feed, renders them as a
 // 1-bit bitmap matching the layout for a Waveshare 7.5" e-paper, and serves
 // the bitmap (plus a PNG preview) over HTTP.
 package calendar
@@ -16,18 +16,27 @@ import (
 	"sync"
 	"syscall"
 	"time"
-
 )
 
-var errNoICalURL = errors.New("ical URL required: set ICAL_URL env var or -ical-url flag")
+var (
+	errNoICalURL        = errors.New("ical URL required: set ICAL_URL env var or -ical-url flag")
+	errNoTimezone       = errors.New("timezone required: set -tz to an IANA name, e.g. America/New_York")
+	errBadFetchInterval = errors.New("fetch interval must be positive")
+)
 
 const (
-	shutdownTimeout   = 5 * time.Second
-	httpReadTimeout   = 10 * time.Second
-	httpWriteTimeout  = 30 * time.Second
-	demoDefaultRSSI   = -55
-	demoDefaultBatPct = 87
-	maxBatPct         = 100
+	shutdownTimeout       = 5 * time.Second
+	httpReadHeaderTimeout = 5 * time.Second
+	httpReadTimeout       = 10 * time.Second
+	httpWriteTimeout      = 30 * time.Second
+	httpIdleTimeout       = 60 * time.Second
+	// staleAfterIntervals is how many fetch intervals may pass without a
+	// successful fetch before the data is reported stale (healthz 503 and a
+	// "(stale)" marker in the footer).
+	staleAfterIntervals = 3
+	demoDefaultRSSI     = -55
+	demoDefaultBatPct   = 87
+	maxBatPct           = 100
 	// rssiUnknown is the sentinel returned by statusFromQuery when the rssi
 	// query param is absent. Any positive value is impossible for real WiFi
 	// RSSI (always negative dBm), so 1 is unambiguous.
@@ -45,29 +54,33 @@ type Config struct {
 }
 
 // server is the running HTTP service. It holds the most recent batch of
-// events from Google Calendar and re-renders the image on every request.
+// events from the iCal feed and re-renders the image on every request.
 type server struct {
 	cfg      Config
 	loc      *time.Location
 	mu       sync.RWMutex
 	cached   []event
 	cachedAt time.Time
+	// lastErr and consecutiveFailures describe fetches since the last success.
+	lastErr             error
+	consecutiveFailures int
 	// renderFn overrides renderImage when non-nil; used only in tests.
-	renderFn func(displayData) (image.Image, error)
+	renderFn func(displayData) image.Image
 }
 
 // Run starts the HTTP server and blocks until SIGINT/SIGTERM.
 // It performs an initial calendar fetch synchronously so a misconfigured
-// deployment (missing creds, bad timezone, network down) fails fast.
+// deployment (bad config, network down) fails fast.
 func Run(cfg Config) error {
-	loc, err := time.LoadLocation(cfg.Timezone)
+	loc, err := validateConfig(cfg)
 	if err != nil {
-		return fmt.Errorf("invalid timezone %q: %w", cfg.Timezone, err)
+		return err
 	}
 
-	if cfg.ICalURL == "" {
-		return errNoICalURL
-	}
+	// Parse the embedded fonts now so a bad embed fails at startup, not on
+	// the first request.
+	_, _ = loadFonts()
+
 	s := &server{
 		cfg:      cfg,
 		loc:      loc,
@@ -85,17 +98,13 @@ func Run(cfg Config) error {
 	var loopDone sync.WaitGroup
 	loopDone.Go(func() { s.refreshLoop(ctx) })
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/calendar.bin", s.handleBin)
-	mux.HandleFunc("/calendar.png", s.handlePNG)
-	mux.HandleFunc("/calendar.demo.png", s.handleDemoPNG)
-	mux.HandleFunc("/healthz", s.handleHealth)
-
 	srv := &http.Server{
-		Addr:         cfg.ListenAddr,
-		Handler:      mux,
-		ReadTimeout:  httpReadTimeout,
-		WriteTimeout: httpWriteTimeout,
+		Addr:              cfg.ListenAddr,
+		Handler:           s.routes(),
+		ReadHeaderTimeout: httpReadHeaderTimeout,
+		ReadTimeout:       httpReadTimeout,
+		WriteTimeout:      httpWriteTimeout,
+		IdleTimeout:       httpIdleTimeout,
 	}
 
 	serveErr := make(chan error, 1)
@@ -120,6 +129,34 @@ func Run(cfg Config) error {
 	}
 
 	return gracefulShutdown(srv, cancel, &loopDone, serveErr)
+}
+
+// routes returns the HTTP handler for all endpoints.
+func (s *server) routes() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/calendar.bin", s.handleBin)
+	mux.HandleFunc("/calendar.png", s.handlePNG)
+	mux.HandleFunc("/calendar.demo.png", s.handleDemoPNG)
+	mux.HandleFunc("/healthz", s.handleHealth)
+	return mux
+}
+
+// validateConfig checks cfg and returns the loaded timezone.
+func validateConfig(cfg Config) (*time.Location, error) {
+	if cfg.Timezone == "" {
+		return nil, errNoTimezone
+	}
+	loc, err := time.LoadLocation(cfg.Timezone)
+	if err != nil {
+		return nil, fmt.Errorf("invalid timezone %q: %w", cfg.Timezone, err)
+	}
+	if cfg.FetchInterval <= 0 {
+		return nil, fmt.Errorf("%w, got %s", errBadFetchInterval, cfg.FetchInterval)
+	}
+	if cfg.ICalURL == "" {
+		return nil, errNoICalURL
+	}
+	return loc, nil
 }
 
 // gracefulShutdown stops the HTTP server, cancels the refresh loop, and
@@ -163,24 +200,46 @@ func (s *server) refreshLoop(ctx context.Context) {
 }
 
 func (s *server) refresh(ctx context.Context) error {
-	events, err := fetchEvents(ctx, s.cfg, s.loc)
+	events, err := fetchEventsIcal(ctx, s.cfg.ICalURL, s.loc)
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if err != nil {
+		s.lastErr = err
+		s.consecutiveFailures++
 		return err
 	}
-	s.mu.Lock()
 	s.cached = events
 	s.cachedAt = time.Now()
-	s.mu.Unlock()
+	s.lastErr = nil
+	s.consecutiveFailures = 0
 	log.Printf("refreshed: %d events", len(events))
 	return nil
 }
 
-func (s *server) snapshot() []event {
+// snapshot returns a copy of the cached events and when they were fetched.
+func (s *server) snapshot() ([]event, time.Time) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	cp := make([]event, len(s.cached))
 	copy(cp, s.cached)
-	return cp
+	return cp, s.cachedAt
+}
+
+// isStale reports whether data fetched at fetchedAt is older than
+// staleAfterIntervals fetch intervals.
+func (s *server) isStale(fetchedAt, now time.Time) bool {
+	return now.Sub(fetchedAt) > staleAfterIntervals*s.cfg.FetchInterval
+}
+
+// liveDisplayData builds the display data for the cached events, including
+// fetch time and staleness for the footer.
+func (s *server) liveDisplayData(bat, rssi int) displayData {
+	events, fetchedAt := s.snapshot()
+	now := time.Now().In(s.loc)
+	data := buildDisplayData(events, s.loc, bat, rssi, now)
+	data.FetchedAt = fetchedAt.In(s.loc)
+	data.Stale = s.isStale(fetchedAt, now)
+	return data
 }
 
 // statusFromQuery parses ?bat=NN&rssi=NN sent by the ESP32 in the calendar.bin
@@ -213,7 +272,7 @@ func statusFromQuery(r *http.Request) (int, int) {
 	return batPct, rssi
 }
 
-func (s *server) doRender(d displayData) (image.Image, error) {
+func (s *server) doRender(d displayData) image.Image {
 	if s.renderFn != nil {
 		return s.renderFn(d)
 	}
@@ -222,13 +281,7 @@ func (s *server) doRender(d displayData) (image.Image, error) {
 
 func (s *server) handleBin(w http.ResponseWriter, r *http.Request) {
 	bat, rssi := statusFromQuery(r)
-	events := s.snapshot()
-	data := buildDisplayData(events, s.loc, bat, rssi, time.Now().In(s.loc))
-	img, err := s.doRender(data)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
+	img := s.doRender(s.liveDisplayData(bat, rssi))
 	if b := img.Bounds(); b.Dx() != imgW || b.Dy() != imgH {
 		log.Printf("pack: image %dx%d ≠ expected %dx%d", b.Dx(), b.Dy(), imgW, imgH)
 		http.Error(w, fmt.Sprintf("unexpected image size %dx%d", b.Dx(), b.Dy()), http.StatusInternalServerError)
@@ -251,13 +304,7 @@ func (s *server) handlePNG(w http.ResponseWriter, r *http.Request) {
 	if rssi == rssiUnknown {
 		rssi = demoDefaultRSSI
 	}
-	events := s.snapshot()
-	data := buildDisplayData(events, s.loc, bat, rssi, time.Now().In(s.loc))
-	img, err := s.doRender(data)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
+	img := s.doRender(s.liveDisplayData(bat, rssi))
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "image/png")
 	if err := writePNG(w, img); err != nil {
@@ -267,12 +314,7 @@ func (s *server) handlePNG(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) handleDemoPNG(w http.ResponseWriter, r *http.Request) {
 	events, now := demoEvents(s.loc)
-	data := buildDisplayData(events, s.loc, demoDefaultBatPct, demoDefaultRSSI, now)
-	img, err := s.doRender(data)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
+	img := s.doRender(buildDisplayData(events, s.loc, demoDefaultBatPct, demoDefaultRSSI, now))
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "image/png")
 	if err := writePNG(w, img); err != nil {
@@ -300,11 +342,27 @@ func demoEvents(loc *time.Location) ([]event, time.Time) {
 	}, now
 }
 
-func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {
+// handleHealth reports "ok" (200) while the cached events are fresh, and
+// "stale" (503) once no fetch has succeeded for staleAfterIntervals fetch
+// intervals, so monitoring notices a broken feed.
+func (s *server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	s.mu.RLock()
-	age := time.Since(s.cachedAt)
+	fetchedAt := s.cachedAt
 	n := len(s.cached)
+	failures := s.consecutiveFailures
+	lastErr := ""
+	if s.lastErr != nil {
+		lastErr = s.lastErr.Error()
+	}
 	s.mu.RUnlock()
+
+	now := time.Now()
+	status, code := "ok", http.StatusOK
+	if s.isStale(fetchedAt, now) {
+		status, code = "stale", http.StatusServiceUnavailable
+	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	_, _ = fmt.Fprintf(w, "ok\nlast_fetch_age=%s\nevents=%d\n", age, n)
+	w.WriteHeader(code)
+	_, _ = fmt.Fprintf(w, "%s\nlast_fetch_age=%s\nevents=%d\nconsecutive_failures=%d\nlast_error=%s\n",
+		status, now.Sub(fetchedAt), n, failures, lastErr)
 }

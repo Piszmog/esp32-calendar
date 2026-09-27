@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -42,7 +44,7 @@ func TestHandler_Healthz(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	body, _ := io.ReadAll(resp.Body)
-	ok, _ := regexp.Match(`^ok\nlast_fetch_age=.+\nevents=\d+\n$`, body)
+	ok, _ := regexp.Match(`^ok\nlast_fetch_age=.+\nevents=\d+\nconsecutive_failures=0\nlast_error=\n$`, body)
 	assert.True(t, ok, "healthz body should match expected format, got: %s", string(body))
 }
 
@@ -132,8 +134,8 @@ func TestHandler_CalendarBin_SizeMismatch(t *testing.T) {
 	t.Parallel()
 	loc := time.UTC
 	now := time.Now()
-	wrongRenderer := func(_ calendar.DisplayData) (image.Image, error) {
-		return image.NewRGBA(image.Rect(0, 0, 100, 100)), nil
+	wrongRenderer := func(_ calendar.DisplayData) image.Image {
+		return image.NewRGBA(image.Rect(0, 0, 100, 100))
 	}
 	handler := calendar.NewTestHandlerWithRenderer(loc, nil, now, wrongRenderer)
 	ts := httptest.NewServer(handler)
@@ -228,4 +230,76 @@ func TestHandler_CalendarPNG_DefaultsMatchExplicit(t *testing.T) {
 	noParams := get("")
 	explicit := get("?bat=87&rssi=-55")
 	assert.Equal(t, noParams, explicit, "/calendar.png with no params should equal ?bat=87&rssi=-55")
+}
+
+func getHealthz(t *testing.T, h http.Handler) (int, string) {
+	t.Helper()
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, ts.URL+"/healthz", nil)
+	require.NoError(t, err)
+	resp, err := ts.Client().Do(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(body)
+}
+
+func TestHandler_Healthz_Stale(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name     string
+		age      time.Duration
+		wantCode int
+		wantHead string
+	}{
+		{"within threshold", 3*calendar.TestFetchInterval - time.Minute, http.StatusOK, "ok\n"},
+		{"past threshold", 3*calendar.TestFetchInterval + time.Minute, http.StatusServiceUnavailable, "stale\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := calendar.NewTestHandler(time.UTC, nil, time.Now().Add(-tc.age))
+			code, body := getHealthz(t, h)
+			assert.Equal(t, tc.wantCode, code)
+			assert.True(t, strings.HasPrefix(body, tc.wantHead), "body: %s", body)
+		})
+	}
+}
+
+func TestHandler_Healthz_ReportsFailures(t *testing.T) {
+	t.Parallel()
+
+	var failing atomic.Bool
+	failing.Store(true)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if failing.Load() {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		_, _ = w.Write([]byte(icsFixture))
+	}))
+	t.Cleanup(srv.Close)
+
+	cfg := calendar.Config{ICalURL: srv.URL, FetchInterval: calendar.TestFetchInterval}
+	s := calendar.NewTestServer(cfg, time.UTC)
+	s.SetCached(nil, time.Now())
+
+	require.Error(t, s.Refresh(t.Context()))
+	require.Error(t, s.Refresh(t.Context()))
+
+	code, body := getHealthz(t, s.Handler())
+	// Two failures inside the threshold: still serving, but visible.
+	assert.Equal(t, http.StatusOK, code)
+	assert.Contains(t, body, "consecutive_failures=2\n")
+	assert.Contains(t, body, "last_error=fetch ical: unexpected HTTP status: 401\n")
+
+	// A successful fetch clears the failure state.
+	failing.Store(false)
+	require.NoError(t, s.Refresh(t.Context()))
+	code, body = getHealthz(t, s.Handler())
+	assert.Equal(t, http.StatusOK, code)
+	assert.Contains(t, body, "consecutive_failures=0\nlast_error=\n")
 }

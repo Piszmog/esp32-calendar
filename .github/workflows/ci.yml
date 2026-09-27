@@ -33,9 +33,9 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: server/go.mod
-          cache: false
+          cache-dependency-path: server/go.sum
       - name: Test
-        run: go test ./...
+        run: go test -race ./...
         working-directory: server
   firmware:
     name: Firmware Build

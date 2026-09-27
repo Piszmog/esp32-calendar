@@ -35,7 +35,20 @@ func SummarizeDay(events []Event) (string, string) { return summarizeDay(events)
 func RSSIToBars(rssi int) int { return rssiToBars(rssi) }
 
 // RenderImage wraps renderImage for blackbox tests.
-func RenderImage(d DisplayData) (image.Image, error) { return renderImage(d) }
+func RenderImage(d DisplayData) image.Image { return renderImage(d) }
+
+// SplitLeftRows wraps splitLeftRows for blackbox tests.
+func SplitLeftRows(nToday, nTomorrow int) (int, int) { return splitLeftRows(nToday, nTomorrow) }
+
+// VisibleChips wraps visibleChips for blackbox tests.
+func VisibleChips(n, rows int) (int, int) { return visibleChips(n, rows) }
+
+// LeftColumnRows wraps leftColumnRows for blackbox tests.
+func LeftColumnRows() int { return leftColumnRows() }
+
+// TestFetchInterval is the fetch interval the test handlers use, so tests
+// can place cachedAt either side of the staleness threshold.
+const TestFetchInterval = 10 * time.Minute
 
 // StatusFromQuery wraps statusFromQuery for blackbox tests.
 func StatusFromQuery(r *http.Request) (int, int) { return statusFromQuery(r) }
@@ -55,23 +68,18 @@ func FetchEventsIcal(ctx context.Context, url string, loc *time.Location) ([]Eve
 }
 
 // NewTestHandler returns the HTTP handler that Run installs, pre-loaded with
-// the given events, without starting a listener, refresh loop, or Google
-// Calendar fetch. Suitable for use with httptest.NewServer in handler tests.
+// the given events, without starting a listener, refresh loop, or iCal
+// fetch. Suitable for use with httptest.NewServer in handler tests.
 func NewTestHandler(loc *time.Location, events []Event, fetchedAt time.Time) http.Handler {
 	s := &server{
-		cfg:      Config{},
+		cfg:      Config{FetchInterval: TestFetchInterval},
 		loc:      loc,
 		mu:       sync.RWMutex{},
 		cached:   events,
 		cachedAt: fetchedAt,
 		renderFn: nil,
 	}
-	mux := http.NewServeMux()
-	mux.HandleFunc("/calendar.bin", s.handleBin)
-	mux.HandleFunc("/calendar.png", s.handlePNG)
-	mux.HandleFunc("/calendar.demo.png", s.handleDemoPNG)
-	mux.HandleFunc("/healthz", s.handleHealth)
-	return mux
+	return s.Handler()
 }
 
 // NewTestHandlerWithRenderer is like NewTestHandler but uses a custom render
@@ -80,22 +88,17 @@ func NewTestHandlerWithRenderer(
 	loc *time.Location,
 	events []Event,
 	fetchedAt time.Time,
-	renderFn func(DisplayData) (image.Image, error),
+	renderFn func(DisplayData) image.Image,
 ) http.Handler {
 	s := &server{
-		cfg:      Config{},
+		cfg:      Config{FetchInterval: TestFetchInterval},
 		loc:      loc,
 		mu:       sync.RWMutex{},
 		cached:   events,
 		cachedAt: fetchedAt,
 		renderFn: renderFn,
 	}
-	mux := http.NewServeMux()
-	mux.HandleFunc("/calendar.bin", s.handleBin)
-	mux.HandleFunc("/calendar.png", s.handlePNG)
-	mux.HandleFunc("/calendar.demo.png", s.handleDemoPNG)
-	mux.HandleFunc("/healthz", s.handleHealth)
-	return mux
+	return s.Handler()
 }
 
 // Server is the internal server type exposed to blackbox tests.
@@ -128,8 +131,12 @@ func (s *Server) Refresh(ctx context.Context) error { return s.refresh(ctx) }
 
 // Cached returns a copy of the currently cached events.
 func (s *Server) Cached() []Event {
-	return s.snapshot()
+	events, _ := s.snapshot()
+	return events
 }
+
+// Handler returns the same routes Run installs, backed by s.
+func (s *Server) Handler() http.Handler { return s.routes() }
 
 // EventsFromICS parses an iCal string and returns events in [timeMin, timeMax],
 // expanding recurring events. Provides a deterministic test entry point for

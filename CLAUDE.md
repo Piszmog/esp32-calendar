@@ -67,7 +67,7 @@ golangci-lint run
 | File | Responsibility |
 |---|---|
 | `server.go` | `Config`, `Run`, `server` struct, HTTP handlers, refresh loop |
-| `fetch.go` | `event` type, `fetchEvents` dispatcher |
+| `fetch.go` | `event` type, `fetchTimeout` |
 | `fetch_ical.go` | iCal HTTP fetch, parse, and event filtering |
 | `render.go` | `buildDisplayData`, `renderImage`, DejaVu font embedding |
 | `icons.go` | WiFi bar and battery icon primitives |
@@ -95,10 +95,11 @@ a test file to `package calendar` — keep the blackbox boundary intact.
 - **Bitmap size is a hard protocol contract.** 800×480 = 48000 bytes. If you change `imgW`/`imgH` in `render.go`, you must also update `IMG_W`/`IMG_H` in the `.ino` and reflash the firmware. There is no version handshake — a size mismatch causes the ESP32 to skip the refresh.
 - **Pack convention is paired.** `pack1Bit` writes MSB-first, bit=1=white. The firmware reads it with `drawInvertedBitmap(..., GxEPD_BLACK)`, which paints black where the bit is 0. If either side changes this convention, the image inverts.
 - **Keep the export surface minimal.** `Config`, `Run` is intentional. Don't add exports unless `cmd/server` genuinely needs them.
-- **Font `init()` panics on bad embed.** `render.go`'s `init()` calls `truetype.Parse` on the embedded TTFs and panics on failure. Don't remove the embedded font files.
+- **Fonts panic on bad embed.** `render.go`'s `loadFonts` (`sync.OnceValues`) calls `truetype.Parse` on the embedded TTFs and panics on failure; `Run` calls it before the first fetch so this happens at startup. Don't remove the embedded font files.
 - **Past-event cutoff:** events starting more than 30 minutes ago are hidden. The constant is `now.Add(-30 * time.Minute)` in `render.go:buildDisplayData`.
-- **Startup is fail-fast.** `Run` validates timezone, checks that `ICalURL` is non-empty (error: `ical URL required: set ICAL_URL env var or -ical-url flag`), then performs an initial synchronous calendar fetch; any misconfiguration fails immediately rather than serving a stale image.
-- **iCal URL is a bearer token.** In production, supply it via the `ICAL_URL` env var (sourced from a `chmod 600` `EnvironmentFile` in the systemd unit) — **not** as a `-ical-url` flag, which would be visible in `ps`. The flag is fine for local dev.
+- **Startup is fail-fast.** `Run` validates timezone (non-empty, loadable) and `FetchInterval` (> 0), checks that `ICalURL` is non-empty (error: `ical URL required: set ICAL_URL env var or -ical-url flag`), then performs an initial synchronous calendar fetch; any misconfiguration fails immediately rather than serving a stale image.
+- **iCal URL is a bearer token.** In production, supply it via the `ICAL_URL` env var (sourced from a `chmod 600` `EnvironmentFile` in the systemd unit) — **not** as a `-ical-url` flag, which would be visible in `ps`. The flag is fine for local dev. Fetch errors go through `redactURL` so the URL never reaches logs or `/healthz`.
+- **Staleness threshold.** Data is stale after `staleAfterIntervals` (3) × `FetchInterval` without a successful fetch: `/healthz` returns 503 and the footer shows "(stale)". The footer's "Updated HH:MM" is the fetch time, not the render time.
 - **No authentication on HTTP endpoints.** The default `-listen :8080` binds to all interfaces; anyone on the LAN can fetch `/calendar.bin` (which contains event titles) or the PNG preview. If this is a concern, bind to `127.0.0.1:8080` and front with a reverse proxy, or restrict firewall rules.
 
 ## Linter notes (`server/.golangci.yml`)
@@ -107,6 +108,8 @@ a test file to `package calendar` — keep the blackbox boundary intact.
 - `exhaustruct` is disabled — too much churn from third-party struct literals (`http.Server`, `truetype.Options`) and from its `v5` rename breaking config compatibility.
 - `tagliatelle` requires snake_case JSON tags.
 - `_test.go` files relax `funlen`, `maintidx`, and `err113`.
+- `formatters:` enables `gofmt` and `goimports` — in golangci v2 these are separate from `linters.default: all`.
+- `gomodguard` is disabled only because it is deprecated; `gomodguard_v2` still runs.
 
 ## Firmware (`firmware/firebeetle_calendar/firebeetle_calendar.ino`)
 

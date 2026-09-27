@@ -1,6 +1,7 @@
 package calendar_test
 
 import (
+	"bytes"
 	"context"
 	"net/http"
 	"net/http/httptest"
@@ -244,7 +245,7 @@ RRULE:FREQ=WEEKLY;COUNT=8
 END:VEVENT
 END:VCALENDAR`
 
-	tMin := anchor                    // 2026-06-01
+	tMin := anchor                   // 2026-06-01
 	tMax := anchor.AddDate(0, 0, 14) // 2026-06-15
 	events := eventsFromICS(t, body, tMin, tMax)
 
@@ -410,4 +411,44 @@ END:VCALENDAR`
 
 	count := countTitle(events, "Event with bad RRULE")
 	assert.Equal(t, 1, count, "malformed RRULE must fall back to DTSTART occurrence, not silently drop the event")
+}
+
+func TestFetchEventsIcal_SendsUserAgent(t *testing.T) {
+	t.Parallel()
+
+	gotUA := make(chan string, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUA <- r.UserAgent()
+		_, _ = w.Write([]byte(icsFixture))
+	}))
+	t.Cleanup(srv.Close)
+
+	_, err := calendar.FetchEventsIcal(t.Context(), srv.URL, time.UTC)
+	require.NoError(t, err)
+	assert.Equal(t, "calendar-display", <-gotUA)
+}
+
+func TestFetchEventsIcal_TooLarge(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(bytes.Repeat([]byte("x"), 10<<20+1))
+	}))
+	t.Cleanup(srv.Close)
+
+	_, err := calendar.FetchEventsIcal(t.Context(), srv.URL, time.UTC)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "exceeds size limit")
+}
+
+func TestFetchEventsIcal_ErrorOmitsURL(t *testing.T) {
+	t.Parallel()
+
+	// A closed server gives a dial error, which net/http wraps with the URL.
+	srv := httptest.NewServer(http.NotFoundHandler())
+	srv.Close()
+
+	_, err := calendar.FetchEventsIcal(t.Context(), srv.URL+"/private-secret-token/basic.ics", time.UTC)
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "secret-token")
 }

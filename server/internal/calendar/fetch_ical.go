@@ -1,10 +1,13 @@
 package calendar
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -12,29 +15,55 @@ import (
 	"github.com/teambition/rrule-go"
 )
 
-var errICalBadStatus = errors.New("fetch ical: unexpected HTTP status")
+var (
+	errICalBadStatus = errors.New("fetch ical: unexpected HTTP status")
+	errICalTooLarge  = errors.New("fetch ical: feed exceeds size limit")
+)
 
-// fetchEventsIcal fetches the iCal feed at url and returns events in the
+const (
+	icalUserAgent = "calendar-display"
+	maxICalBytes  = 10 << 20
+)
+
+// redactURL strips the request URL from net/http errors. The iCal URL is a
+// bearer token and must not reach logs or /healthz.
+func redactURL(err error) error {
+	if uerr, ok := errors.AsType[*url.Error](err); ok {
+		return fmt.Errorf("%s: %w", uerr.Op, uerr.Err)
+	}
+	return err
+}
+
+// fetchEventsIcal fetches the iCal feed at feedURL and returns events in the
 // window [now-1h, now+8d]. Recurring events (RRULE/RDATE) are expanded
 // client-side by rrule-go; EXDATE exclusions are honoured.
-func fetchEventsIcal(ctx context.Context, url string, loc *time.Location) ([]event, error) {
+func fetchEventsIcal(ctx context.Context, feedURL string, loc *time.Location) ([]event, error) {
 	ctx, cancel := context.WithTimeout(ctx, fetchTimeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, feedURL, nil)
 	if err != nil {
-		return nil, fmt.Errorf("build ical request: %w", err)
+		return nil, fmt.Errorf("build ical request: %w", redactURL(err))
 	}
+	req.Header.Set("User-Agent", icalUserAgent)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("fetch ical: %w", err)
+		return nil, fmt.Errorf("fetch ical: %w", redactURL(err))
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("%w: %d", errICalBadStatus, resp.StatusCode)
 	}
 
-	cal, err := ics.ParseCalendar(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxICalBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read ical: %w", err)
+	}
+	if len(body) > maxICalBytes {
+		return nil, fmt.Errorf("%w (%d bytes)", errICalTooLarge, maxICalBytes)
+	}
+
+	cal, err := ics.ParseCalendar(bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("parse ical: %w", err)
 	}

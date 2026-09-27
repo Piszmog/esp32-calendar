@@ -11,7 +11,7 @@ esp32-calendar/
 │   ├── cmd/server/main.go      Flags, entrypoint
 │   └── internal/calendar/      The only package
 │       ├── server.go           Config, Run, HTTP handlers, refresh loop
-│       ├── fetch.go            event type, fetchEvents dispatcher
+│       ├── fetch.go            event type, fetchTimeout
 │       ├── fetch_ical.go       iCal HTTP fetch, parse, and event filtering
 │       ├── render.go           buildDisplayData, renderImage, DejaVu font embedding
 │       ├── icons.go            WiFi bar and battery icon drawing
@@ -103,9 +103,9 @@ version handshake — a size mismatch causes the ESP32 to silently skip the refr
 firmware reads with `drawInvertedBitmap(..., GxEPD_BLACK)`, which paints black
 where the bit is 0. If either side changes this convention, the image inverts.
 
-**Font `init()` panics on bad embed.** `render.go`'s `init()` calls
-`truetype.Parse` on the embedded TTFs and panics on failure. Don't remove the
-embedded font files under `internal/calendar/fonts/`.
+**Fonts panic on bad embed.** `render.go`'s `loadFonts` calls
+`truetype.Parse` on the embedded TTFs and panics on failure; `Run` calls it at
+startup. Don't remove the embedded font files under `internal/calendar/fonts/`.
 
 **Past-event cutoff.** Events starting more than 30 minutes ago are hidden. The
 constant is `now.Add(-30 * time.Minute)` in `render.go:buildDisplayData`.

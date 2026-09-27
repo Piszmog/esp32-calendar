@@ -181,7 +181,7 @@ Endpoints:
 |-----|---------|
 | `http://<pi>:8080/calendar.png` | Preview in any browser |
 | `http://<pi>:8080/calendar.bin` | Packed 1-bit bitmap the ESP32 fetches |
-| `http://<pi>:8080/healthz`      | Plain-text health + last-fetch age |
+| `http://<pi>:8080/healthz`      | Plain-text health: 200 `ok`, or 503 `stale` after 3 fetch intervals without a successful fetch |
 
 ## 5. Flash the firmware
 
@@ -199,6 +199,8 @@ Endpoints:
    const char* WIFI_PASS   = "your-password";
    const char* SERVER_HOST = "192.168.1.50";  // Pi's static IP
    ```
+   A `.local` hostname also works if the Pi runs Avahi (Raspberry Pi OS does
+   by default); the ESP32 resolves it via mDNS without extra setup.
 2. Open `firmware/firebeetle_calendar/firebeetle_calendar.ino`. Edit
    `SERVER_PORT` in the `USER CONFIG` block if needed.
 3. **Tools → Board → DFRobot FireBeetle 2 ESP32-E** (or "ESP32 Dev Module").
@@ -280,6 +282,12 @@ gitignored and preserved across `git pull`.
 
 A 2000 mAh LiPo gets ~80 days between charges; a 5000 mAh battery gets 6+ months.
 
+- **Failures back off.** A failed wake (WiFi, server, or fetch) retries after
+  5, then 15, 30, and 60 minutes. The last calendar stays on screen until 3
+  failures in a row, then an error screen is drawn once.
+- **Low-battery cutoff.** Below 3.4 V the display shows "Battery low" and the
+  board sleeps until you charge it and press reset.
+
 ## 9. Enclosure
 
 3D-printed case: [Weather Station E-Ink Frame](https://www.printables.com/model/1139047-weather-station-e-ink-frame).
@@ -289,13 +297,15 @@ A 2000 mAh LiPo gets ~80 days between charges; a 5000 mAh battery gets 6+ months
 | Symptom | First thing to check |
 |---------|---------------------|
 | Service won't start | `journalctl -u calendar -n 50 --no-pager` |
-| Server exits immediately | `ical URL required` → `ICAL_URL` not set in `calendar.env` or wrong path; `invalid timezone` → bad `-tz` value |
+| Server exits immediately | `ical URL required` → `ICAL_URL` not set in `calendar.env` or wrong path; `invalid timezone` / `timezone required` → bad or empty `-tz` value; `fetch interval must be positive` → bad `-fetch-interval` |
+| `/healthz` returns 503 `stale`, or the display footer says "(stale)" | Fetches are failing — `last_error=` in the `/healthz` body says why |
 | `fetch ical: unexpected HTTP status` in logs | The secret iCal URL was reset or is wrong — re-copy it from Google Calendar → Settings → Integrate calendar and update `calendar.env`, then `systemctl restart calendar` |
 | Port 8080 unreachable from ESP32 | `sudo ufw status` on the Pi — allow port 8080 if a firewall is active |
 | Serial shows WiFi failure / no IP | `WIFI_SSID` / `WIFI_PASS` in `firmware/firebeetle_calendar/secrets.h` |
 | Serial shows HTTP 404 or connection refused | `SERVER_HOST` wrong, or service not running — `systemctl status calendar` on the Pi |
 | ESP32 boots but display stays blank | Re-check wiring (section 2), or a pack/draw convention mismatch (see DEVELOPMENT.md) |
 | Image is inverted | In the firmware, swap `drawInvertedBitmap` → `drawBitmap` |
+| Display says "Battery low" | Charge the LiPo, then press the FireBeetle's reset button — the board doesn't wake on its own after a low-battery cutoff |
 | Battery reads 0% always | Confirm your FireBeetle has the battery sense voltage divider on GPIO34 (some clones omit it); adjust calibration in `batteryPercent()` in the `.ino` |
 | Battery icon obviously wrong | Adjust the LiPo curve in `batteryPercent()` in the `.ino` |
 | `arduino-cli` can't find the board | macOS CP2102 driver approval (see section 5); re-run `arduino-cli board list` |

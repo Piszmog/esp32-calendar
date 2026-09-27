@@ -1,4 +1,4 @@
-// Command calendar-server renders Google Calendar events as a 1-bit bitmap
+// Command calendar-server renders iCal feed events as a 1-bit bitmap
 // served over HTTP for an ESP32 e-paper client.
 package main
 

@@ -288,8 +288,7 @@ func TestRenderImage_Dimensions(t *testing.T) {
 	loc := time.UTC
 	now := time.Date(2026, 5, 11, 12, 0, 0, 0, loc)
 	d := calendar.BuildDisplayData(nil, loc, 87, -55, now)
-	img, err := calendar.RenderImage(d)
-	require.NoError(t, err)
+	img := calendar.RenderImage(d)
 	b := img.Bounds()
 	assert.Equal(t, 800, b.Dx())
 	assert.Equal(t, 480, b.Dy())
@@ -484,4 +483,103 @@ func TestBuildDisplayData_AllDayWeekAheadSpan(t *testing.T) {
 	for i, ds := range d.WeekAhead {
 		assert.Contains(t, ds.Summary, "Week Sprint", "WeekAhead[%d] (%s) should show the ongoing all-day event", i, ds.Date.Format("Mon"))
 	}
+}
+
+func TestLeftColumnRows(t *testing.T) {
+	t.Parallel()
+	// 7 rows: the last Tomorrow row ends at y=436, above the footer at 448.
+	assert.Equal(t, 7, calendar.LeftColumnRows())
+}
+
+func TestSplitLeftRows(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name                    string
+		nToday, nTomorrow       int
+		wantToday, wantTomorrow int
+	}{
+		{"both empty", 0, 0, 1, 6},
+		{"few events", 2, 1, 2, 5},
+		{"today overflows, tomorrow empty", 10, 0, 6, 1},
+		{"today overflows, tomorrow one", 10, 1, 6, 1},
+		{"today overflows, tomorrow many", 10, 5, 5, 2},
+		{"tomorrow overflows", 1, 10, 1, 6},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			today, tomorrow := calendar.SplitLeftRows(tc.nToday, tc.nTomorrow)
+			assert.Equal(t, tc.wantToday, today, "today rows")
+			assert.Equal(t, tc.wantTomorrow, tomorrow, "tomorrow rows")
+			assert.Equal(t, calendar.LeftColumnRows(), today+tomorrow)
+		})
+	}
+}
+
+func TestVisibleChips(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name                  string
+		n, rows               int
+		wantShown, wantHidden int
+	}{
+		{"none", 0, 3, 0, 0},
+		{"fits exactly", 3, 3, 3, 0},
+		{"one over", 4, 3, 2, 2},
+		{"many over", 10, 5, 4, 6},
+		{"single row", 2, 1, 0, 2},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			shown, hidden := calendar.VisibleChips(tc.n, tc.rows)
+			assert.Equal(t, tc.wantShown, shown, "shown")
+			assert.Equal(t, tc.wantHidden, hidden, "hidden")
+		})
+	}
+}
+
+// TestRenderImage_BusyDayStaysAboveFooter renders more events than fit and
+// checks the strip just above the footer line is blank in the left column.
+func TestRenderImage_BusyDayStaysAboveFooter(t *testing.T) {
+	t.Parallel()
+	loc := time.UTC
+	now := time.Date(2026, 5, 11, 8, 0, 0, 0, loc)
+	events := make([]calendar.Event, 0, 15)
+	for i := range 10 {
+		events = append(events, calendar.Event{Start: now.Add(time.Duration(i+1) * time.Hour), Title: "Today event"})
+	}
+	for i := range 5 {
+		events = append(events, calendar.Event{Start: time.Date(2026, 5, 12, 9+i, 0, 0, 0, loc), Title: testTitleTomorrow})
+	}
+	d := calendar.BuildDisplayData(events, loc, -1, 0, now)
+	require.Len(t, d.Today, 10)
+	require.Len(t, d.Tomorrow, 5)
+
+	img := calendar.RenderImage(d)
+	for y := 438; y <= 446; y++ {
+		for x := 20; x <= 420; x++ {
+			r, g, b, _ := img.At(x, y).RGBA()
+			require.Greater(t, (r+g+b)/3, uint32(32768), "pixel (%d,%d) above footer should be white", x, y)
+		}
+	}
+}
+
+func TestRenderImage_FooterShowsFetchTimeAndStale(t *testing.T) {
+	t.Parallel()
+	loc := time.UTC
+	now := time.Date(2026, 5, 11, 12, 0, 0, 0, loc)
+	base := calendar.BuildDisplayData(nil, loc, -1, 0, now)
+	fresh := calendar.RenderImage(base)
+
+	fetched := base
+	fetched.FetchedAt = now.Add(-2 * time.Hour)
+	older := calendar.RenderImage(fetched)
+
+	stale := fetched
+	stale.Stale = true
+	staleImg := calendar.RenderImage(stale)
+
+	assert.NotEqual(t, calendar.Pack1Bit(fresh), calendar.Pack1Bit(older), "footer should show fetch time, not render time")
+	assert.NotEqual(t, calendar.Pack1Bit(older), calendar.Pack1Bit(staleImg), "stale flag should change the footer")
 }

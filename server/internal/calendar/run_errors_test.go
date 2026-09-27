@@ -12,6 +12,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// unusedICalURL is never fetched: validation fails before the first fetch.
+const unusedICalURL = "http://unused.invalid"
+
 func TestRun_Errors(t *testing.T) {
 	t.Parallel()
 
@@ -33,6 +36,36 @@ func TestRun_Errors(t *testing.T) {
 				FetchInterval: time.Minute,
 			},
 			"invalid timezone",
+		},
+		{
+			"empty timezone",
+			calendar.Config{
+				Timezone:      "",
+				ListenAddr:    ":0",
+				FetchInterval: time.Minute,
+				ICalURL:       unusedICalURL,
+			},
+			"timezone required",
+		},
+		{
+			"zero fetch interval",
+			calendar.Config{
+				Timezone:      testTimezoneUTC,
+				ListenAddr:    ":0",
+				FetchInterval: 0,
+				ICalURL:       unusedICalURL,
+			},
+			"fetch interval must be positive",
+		},
+		{
+			"negative fetch interval",
+			calendar.Config{
+				Timezone:      testTimezoneUTC,
+				ListenAddr:    ":0",
+				FetchInterval: -time.Minute,
+				ICalURL:       unusedICalURL,
+			},
+			"fetch interval must be positive",
 		},
 		{
 			"missing ical url",

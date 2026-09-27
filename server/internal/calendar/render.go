@@ -6,6 +6,7 @@ import (
 	"image"
 	"image/png"
 	"io"
+	"math"
 	"sort"
 	"strings"
 	"sync"
@@ -61,14 +62,15 @@ const (
 	sectionHeadRuleY = 24.0
 	tomorrowGap      = 10.0
 	weekHeaderGap    = 30.0
-	weekRowH        = 64.0
-	weekTextOffY    = 6.0
-	weekDashOffY    = 32.0
-	weekSummaryOffY = 30.0
-	weekMoreOffY    = 50.0
+	weekRowH         = 64.0
+	weekTextOffY     = 6.0
+	weekDashOffY     = 32.0
+	weekSummaryOffY  = 30.0
+	weekMoreOffY     = 50.0
 
 	// Footer constants.
 	footerH           = 32.0
+	footerTop         = float64(imgH) - footerH
 	footerPadX        = 22.0
 	footerWifiOffY    = 8.0
 	footerBatteryOffY = 9.0
@@ -126,6 +128,8 @@ func face(size float64, bold bool) font.Face {
 // calendar events through filtering and grouping logic.
 type displayData struct {
 	Now        time.Time
+	FetchedAt  time.Time // when the events were fetched; zero = use Now
+	Stale      bool      // no successful fetch for a while; footer says so
 	Today      []event
 	Tomorrow   []event
 	WeekAhead  []daySummary
@@ -174,6 +178,8 @@ func buildDisplayData(events []event, loc *time.Location, batPct, rssi int, now 
 
 	d := displayData{
 		Now:        now,
+		FetchedAt:  time.Time{},
+		Stale:      false,
 		Today:      nil,
 		Tomorrow:   nil,
 		WeekAhead:  nil,
@@ -326,19 +332,49 @@ func rssiToBars(rssi int) int {
 }
 
 // renderImage produces the 800x480 RGBA image of the calendar.
-func renderImage(d displayData) (image.Image, error) {
+func renderImage(d displayData) image.Image {
 	dc := gg.NewContext(imgW, imgH)
 	dc.SetRGB(1, 1, 1)
 	dc.Clear()
 	dc.SetRGB(0, 0, 0)
 
 	contentTop := drawHeader(dc, d.Now)
-	y := drawTodayPanel(dc, d, contentTop)
-	drawTomorrowPanel(dc, d, y)
+	todayRows, tomorrowRows := splitLeftRows(len(d.Today), len(d.Tomorrow))
+	y := drawTodayPanel(dc, d, contentTop, todayRows)
+	drawTomorrowPanel(dc, d, y, tomorrowRows)
 	drawWeekAheadPanel(dc, d, contentTop)
 	drawFooterPanel(dc, d)
 
-	return dc.Image(), nil
+	return dc.Image()
+}
+
+// leftColumnRows is how many chip rows fit in the left column between the
+// Today header and the footer, after the Tomorrow header and gap.
+func leftColumnRows() int {
+	firstRowY := headerH + contentTopGap + sectionGapY
+	avail := footerTop - chipGap - firstRowY - tomorrowGap - sectionGapY
+	return int(math.Floor((avail + chipGap) / (chipH + chipGap)))
+}
+
+// splitLeftRows divides the left column's rows between Today and Tomorrow.
+// Today gets priority; Tomorrow keeps at least one row (two when it has two
+// or more events, so it can show a chip plus a "+ N more" line).
+func splitLeftRows(nToday, nTomorrow int) (int, int) {
+	const tomorrowMaxReserved = 2
+	total := leftColumnRows()
+	tomorrowMin := min(max(nTomorrow, 1), tomorrowMaxReserved)
+	todayRows := min(max(nToday, 1), total-tomorrowMin)
+	return todayRows, total - todayRows
+}
+
+// visibleChips returns how many of n events to draw as chips in rows rows,
+// and how many are hidden behind a "+ N more" line (which takes one row).
+func visibleChips(n, rows int) (int, int) {
+	if n <= rows {
+		return n, 0
+	}
+	shown := rows - 1
+	return shown, n - shown
 }
 
 func drawHeader(dc *gg.Context, now time.Time) float64 {
@@ -350,7 +386,7 @@ func drawHeader(dc *gg.Context, now time.Time) float64 {
 	return headerH + contentTopGap
 }
 
-func drawTodayPanel(dc *gg.Context, d displayData, startY float64) float64 {
+func drawTodayPanel(dc *gg.Context, d displayData, startY float64, rows int) float64 {
 	y := startY
 	dc.SetFontFace(face(fontSizeSectionHead, true))
 	drawTopLeft(dc, "TODAY", leftX, y)
@@ -363,15 +399,28 @@ func drawTodayPanel(dc *gg.Context, d displayData, startY float64) float64 {
 		drawTopLeft(dc, "Nothing else scheduled today", leftX, y+chipTextOffY)
 		y += chipH + chipGap
 	} else {
-		for _, ev := range d.Today {
-			drawChip(dc, leftX, y, leftW, chipH, ev, todayChipLineW)
-			y += chipH + chipGap
-		}
+		y = drawChips(dc, d.Today, y, rows, todayChipLineW)
 	}
 	return y + tomorrowGap
 }
 
-func drawTomorrowPanel(dc *gg.Context, d displayData, startY float64) {
+// drawChips draws event chips starting at y, using at most the given number
+// of rows and replacing the overflow with a "+ N more" line. Returns the y below the last row.
+func drawChips(dc *gg.Context, events []event, y float64, rows int, lineW float64) float64 {
+	shown, hidden := visibleChips(len(events), rows)
+	for _, ev := range events[:shown] {
+		drawChip(dc, leftX, y, leftW, chipH, ev, lineW)
+		y += chipH + chipGap
+	}
+	if hidden > 0 {
+		dc.SetFontFace(face(fontSizeBody, false))
+		drawTopLeft(dc, moreSuffix(hidden), leftX+chipTimeX, y+chipTextOffY)
+		y += chipH + chipGap
+	}
+	return y
+}
+
+func drawTomorrowPanel(dc *gg.Context, d displayData, startY float64, rows int) {
 	y := startY
 	dc.SetFontFace(face(fontSizeSectionHead, true))
 	drawTopLeft(dc, "TOMORROW", leftX, y)
@@ -379,10 +428,7 @@ func drawTomorrowPanel(dc *gg.Context, d displayData, startY float64) {
 	dc.DrawLine(leftX, y+sectionHeadRuleY, leftX+leftW, y+sectionHeadRuleY)
 	dc.Stroke()
 	y += sectionGapY
-	for _, ev := range d.Tomorrow {
-		drawChip(dc, leftX, y, leftW, chipH, ev, tomorrowChipLineW)
-		y += chipH + chipGap
-	}
+	drawChips(dc, d.Tomorrow, y, rows, tomorrowChipLineW)
 	if len(d.Tomorrow) == 0 {
 		dc.SetFontFace(face(fontSizeBody, false))
 		drawTopLeft(dc, "Nothing scheduled tomorrow", leftX, y+chipTextOffY)
@@ -418,7 +464,6 @@ func drawWeekAheadPanel(dc *gg.Context, d displayData, contentTop float64) {
 }
 
 func drawFooterPanel(dc *gg.Context, d displayData) {
-	footerTop := float64(imgH) - footerH
 	dc.SetLineWidth(1)
 	dc.DrawLine(0, footerTop, float64(imgW), footerTop)
 	dc.Stroke()
@@ -434,7 +479,14 @@ func drawFooterPanel(dc *gg.Context, d displayData) {
 	}
 
 	dc.SetFontFace(face(fontSizeFooter, false))
-	updStr := d.Now.Format("Updated 15:04")
+	fetchedAt := d.FetchedAt
+	if fetchedAt.IsZero() {
+		fetchedAt = d.Now
+	}
+	updStr := fetchedAt.Format("Updated 15:04")
+	if d.Stale {
+		updStr += " (stale)"
+	}
 	updW, _ := dc.MeasureString(updStr)
 	drawTopLeft(dc, updStr, float64(imgW)-updW-footerRightPad, footerTop+footerWifiOffY)
 }

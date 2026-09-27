@@ -28,10 +28,9 @@
 
 #include <WiFi.h>
 #include <HTTPClient.h>
-#include <ESPmDNS.h>
 #include <GxEPD2_BW.h>
 #include "esp_sleep.h"
-#include "esp_adc_cal.h"
+#include "esp_task_wdt.h"
 #include "driver/gpio.h"
 #include <time.h>
 
@@ -59,6 +58,31 @@ constexpr uint32_t IMG_W = 800;
 constexpr uint32_t IMG_H = 480;
 constexpr uint32_t BUF_BYTES = IMG_W * IMG_H / 8;   // 48000
 
+// Whole wake cycle must finish within this, or the task watchdog resets the
+// board (worst case: 28 s WiFi + 2 s NTP + 20 s fetch + ~20 s display).
+constexpr uint32_t WDT_TIMEOUT_MS = 120000;
+
+// Single deadline for the HTTP fetch, from request start to last byte.
+constexpr uint32_t FETCH_DEADLINE_MS = 20000;
+
+// Below LOW_BATT_MV the board shows a "charge me" screen and sleeps until
+// reset, instead of browning out on every wake. Readings under
+// NO_BATT_SENSE_MV mean the battery-sense divider is absent (some clones),
+// so the cutoff is skipped rather than bricking the board.
+constexpr uint32_t LOW_BATT_MV      = 3400;
+constexpr uint32_t NO_BATT_SENSE_MV = 2500;
+
+// Failed wakes back off 5 -> 15 -> 30 -> 60 min. The error screen replaces the
+// calendar only after ERROR_SCREEN_AFTER consecutive failures, and is drawn
+// once, not on every retry.
+constexpr uint8_t ERROR_SCREEN_AFTER = 3;
+
+// Survive deep sleep (cleared on power-on or reset).
+RTC_DATA_ATTR uint8_t rtcFailCount   = 0;
+RTC_DATA_ATTR bool    rtcErrorShown  = false;
+RTC_DATA_ATTR uint8_t rtcBssid[6]    = {0};
+RTC_DATA_ATTR int32_t rtcChannel     = 0;   // 0 = no cached AP
+
 void goToSleep(uint64_t seconds) {
     Serial.flush();
     esp_sleep_enable_timer_wakeup(seconds * 1000000ULL);
@@ -80,16 +104,43 @@ uint64_t nextWakeSeconds() {
     return (uint64_t)secsToMark;
 }
 
-bool connectWiFi() {
-    WiFi.mode(WIFI_STA);
-    WiFi.begin(WIFI_SSID, WIFI_PASS);
+// Returns seconds to sleep after the given number of consecutive failures.
+uint64_t backoffSeconds(uint8_t failures) {
+    switch (failures) {
+        case 0:
+        case 1:  return 5ULL * 60ULL;
+        case 2:  return 15ULL * 60ULL;
+        case 3:  return 30ULL * 60ULL;
+        default: return 60ULL * 60ULL;
+    }
+}
+
+bool waitForWiFi(uint32_t timeoutMs) {
     uint32_t t0 = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - t0 < 20000) {
+    while (WiFi.status() != WL_CONNECTED && millis() - t0 < timeoutMs) {
         delay(250);
         Serial.print('.');
     }
     Serial.println();
     return WiFi.status() == WL_CONNECTED;
+}
+
+// Connects using the AP (BSSID + channel) cached from the last wake, which
+// skips the scan; falls back to a full scan if that fails.
+bool connectWiFi() {
+    WiFi.mode(WIFI_STA);
+    if (rtcChannel > 0) {
+        WiFi.begin(WIFI_SSID, WIFI_PASS, rtcChannel, rtcBssid);
+        if (waitForWiFi(8000)) return true;
+        Serial.println("cached AP failed, scanning");
+        WiFi.disconnect();
+        rtcChannel = 0;
+    }
+    WiFi.begin(WIFI_SSID, WIFI_PASS);
+    if (!waitForWiFi(20000)) return false;
+    memcpy(rtcBssid, WiFi.BSSID(), sizeof(rtcBssid));
+    rtcChannel = WiFi.channel();
+    return true;
 }
 
 const char* wifiStatusStr(wl_status_t status) {
@@ -105,25 +156,20 @@ const char* wifiStatusStr(wl_status_t status) {
 // Read battery voltage on FireBeetle 2 ESP32-E (GPIO34, 1:2 divider).
 // Returns voltage in millivolts.
 uint32_t readBatteryMv() {
-    esp_adc_cal_characteristics_t adc_chars;
-    esp_adc_cal_characterize(ADC_UNIT_1, ADC_ATTEN_DB_11,
-                             ADC_WIDTH_BIT_12, 1100, &adc_chars);
-
     // Discard first two reads: ESP32 SAR ADC produces a noisier sample
     // on the first call after deep-sleep wake or cold boot.
-    analogRead(BATT_ADC_PIN);
-    analogRead(BATT_ADC_PIN);
+    analogReadMilliVolts(BATT_ADC_PIN);
+    analogReadMilliVolts(BATT_ADC_PIN);
 
-    // Average a few reads to smooth noise.
-    uint32_t raw = 0;
+    // Average a few calibrated reads to smooth noise.
+    uint32_t pin_mv = 0;
     const int N = 16;
     for (int i = 0; i < N; i++) {
-        raw += analogRead(BATT_ADC_PIN);
+        pin_mv += analogReadMilliVolts(BATT_ADC_PIN);
         delay(2);
     }
-    raw /= N;
+    pin_mv /= N;
 
-    uint32_t pin_mv = esp_adc_cal_raw_to_voltage(raw, &adc_chars);
     // FireBeetle 2 has a 1:2 internal divider on the battery sense pin.
     return pin_mv * 2;
 }
@@ -146,8 +192,9 @@ bool fetchImage(uint8_t* buf, int batPct, int rssi, char* reason, size_t reasonL
 
     Serial.printf("GET %s\n", url);
 
+    uint32_t t0 = millis();
     HTTPClient http;
-    http.setTimeout(20000);
+    http.setTimeout(FETCH_DEADLINE_MS);
     if (!http.begin(url)) {
         snprintf(reason, reasonLen, "http.begin() failed");
         Serial.println(reason);
@@ -180,8 +227,8 @@ bool fetchImage(uint8_t* buf, int batPct, int rssi, char* reason, size_t reasonL
         http.end();
         return false;
     }
-    uint32_t got = 0, t0 = millis();
-    while (got < BUF_BYTES && millis() - t0 < 20000) {
+    uint32_t got = 0;
+    while (got < BUF_BYTES && millis() - t0 < FETCH_DEADLINE_MS) {
         size_t avail = s->available();
         if (avail) {
             int n = s->readBytes(buf + got,
@@ -233,57 +280,85 @@ void drawError(const char* title, const char* detail, const char* statusLine) {
     display.hibernate();
 }
 
+// Records a failed wake, shows the error screen once the failure streak
+// reaches ERROR_SCREEN_AFTER (leaving the last calendar up until then), and
+// sleeps with backoff. Does not return.
+void failAndSleep(const char* title, const char* detail, const char* statusLine) {
+    if (rtcFailCount < UINT8_MAX) rtcFailCount++;
+    Serial.printf("failure %u: %s: %s\n", rtcFailCount, title, detail);
+    if (rtcFailCount >= ERROR_SCREEN_AFTER && !rtcErrorShown) {
+        drawError(title, detail, statusLine);
+        rtcErrorShown = true;
+    }
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
+    uint64_t sleepSecs = backoffSeconds(rtcFailCount);
+    Serial.printf("sleeping %llus\n", sleepSecs);
+    goToSleep(sleepSecs);
+}
+
 void setup() {
     Serial.begin(115200);
     delay(100);
     Serial.println("\n== calendar wake ==");
+
+    // The core starts the task watchdog but doesn't watch this task; extend
+    // the timeout to cover a whole cycle and subscribe, so a hang resets.
+    esp_task_wdt_config_t wdtConfig = {
+        .timeout_ms = WDT_TIMEOUT_MS,
+        .idle_core_mask = 0,
+        .trigger_panic = true,
+    };
+    esp_task_wdt_reconfigure(&wdtConfig);
+    esp_task_wdt_add(NULL);
 
     // Read battery BEFORE WiFi powers up (cleaner reading).
     uint32_t mv = readBatteryMv();
     int batPct = batteryPercent(mv);
     Serial.printf("battery: %u mV (%d%%)\n", mv, batPct);
 
+    if (mv > NO_BATT_SENSE_MV && mv < LOW_BATT_MV) {
+        Serial.println("battery low — sleeping until reset");
+        char detail[48];
+        snprintf(detail, sizeof(detail), "%u mV. Charge, then press reset.", mv);
+        drawError("Battery low", detail, "");
+        Serial.flush();
+        esp_deep_sleep_start();   // no wakeup source: sleeps until reset
+    }
+
+    char status[40];
+    snprintf(status, sizeof(status), "battery %d%%", batPct);
     if (!connectWiFi()) {
-        Serial.println("wifi failed");
-        char status[32];
-        snprintf(status, sizeof(status), "battery %d%%", batPct);
-        drawError("WiFi connect failed", wifiStatusStr(WiFi.status()), status);
-        goToSleep(5ULL * 60ULL);
+        failAndSleep("WiFi connect failed", wifiStatusStr(WiFi.status()), status);
     }
     int rssi = WiFi.RSSI();
     Serial.printf("rssi: %d dBm\n", rssi);
-
-    size_t hostLen = strlen(SERVER_HOST);
-    if (hostLen > 6 && strcmp(SERVER_HOST + hostLen - 6, ".local") == 0) {
-        if (!MDNS.begin("firebeetle-calendar")) {
-            Serial.println("mDNS init failed");
-        }
-    }
+    snprintf(status, sizeof(status), "battery %d%%  rssi %d dBm", batPct, rssi);
 
     configTime(0, 0, "pool.ntp.org", "time.google.com");
     for (int i = 0; i < 20 && time(nullptr) < 1704067200; i++) delay(100);
+    if (time(nullptr) < 1704067200) {
+        Serial.println("warning: NTP not synced, next wake not aligned to :00/:30");
+    }
 
     uint8_t* buf = (uint8_t*)malloc(BUF_BYTES);
     if (!buf) {
-        Serial.println("malloc failed");
-        goToSleep(5ULL * 60ULL);
+        failAndSleep("Out of memory", "malloc failed", status);
     }
 
     char reason[64];
-    bool fetchOk = fetchImage(buf, batPct, rssi, reason, sizeof(reason));
-    if (fetchOk) {
-        drawBuffer(buf);
-    } else {
-        Serial.println("fetch failed — showing error screen");
-        char status[32];
-        snprintf(status, sizeof(status), "battery %d%%  rssi %d dBm", batPct, rssi);
-        drawError("Calendar fetch failed", reason, status);
+    if (!fetchImage(buf, batPct, rssi, reason, sizeof(reason))) {
+        free(buf);
+        failAndSleep("Calendar fetch failed", reason, status);
     }
-
+    drawBuffer(buf);
     free(buf);
+
+    rtcFailCount = 0;
+    rtcErrorShown = false;
     WiFi.disconnect(true);
     WiFi.mode(WIFI_OFF);
-    uint64_t sleepSecs = fetchOk ? nextWakeSeconds() : 5ULL * 60ULL;
+    uint64_t sleepSecs = nextWakeSeconds();
     Serial.printf("sleeping %llus\n", sleepSecs);
     goToSleep(sleepSecs);
 }

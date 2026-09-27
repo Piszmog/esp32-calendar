@@ -6,12 +6,12 @@ import "github.com/fogleman/gg"
 // Origin (x,y) is the top-left of the icon.
 func drawWifi(dc *gg.Context, x, y float64, signal int) {
 	const (
-		bars            = 4
-		barW            = 4.0
-		gap             = 2.0
-		baseH           = 18.0 // height of the tallest (rightmost) bar
-		wifiBarBaseH    = 4.0
-		wifiBarStep     = 4.0
+		bars         = 4
+		barW         = 4.0
+		gap          = 2.0
+		baseH        = 18.0 // height of the tallest (rightmost) bar
+		wifiBarBaseH = 4.0
+		wifiBarStep  = 4.0
 	)
 	dc.SetRGB(0, 0, 0)
 	baseY := y + baseH
@@ -33,13 +33,13 @@ func drawWifi(dc *gg.Context, x, y float64, signal int) {
 // Origin (x,y) is the top-left of the body (not including nub).
 func drawBattery(dc *gg.Context, x, y float64, pct int) {
 	const (
-		bodyW      = 34.0
-		bodyH      = 16.0
-		nubW       = 3.0
-		nubH       = 8.0
-		padding    = 3.0
-		strokeW    = 2.0
-		pctMax     = 100
+		bodyW   = 34.0
+		bodyH   = 16.0
+		nubW    = 3.0
+		nubH    = 8.0
+		padding = 3.0
+		strokeW = 2.0
+		pctMax  = 100
 	)
 	dc.SetRGB(0, 0, 0)
 	dc.SetLineWidth(strokeW)

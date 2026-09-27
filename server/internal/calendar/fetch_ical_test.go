@@ -619,3 +619,110 @@ END:VCALENDAR`
 	assert.Equal(t, 9, ev.Start.In(london).Hour(), "occurrence must stay at 09:00 London")
 	assert.Equal(t, denver, ev.Start.Location(), "events are normalized to the configured zone")
 }
+
+func TestParseIcalDuration(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		in    string
+		days  int
+		clock time.Duration
+		ok    bool
+	}{
+		{"P1W", 7, 0, true},
+		{"P3D", 3, 0, true},
+		{"PT1H30M", 0, 90 * time.Minute, true},
+		{"P1DT2H", 1, 2 * time.Hour, true},
+		{"+PT45S", 0, 45 * time.Second, true},
+		{"-PT15M", 0, -15 * time.Minute, true},
+		{"", 0, 0, false},
+		{"P", 0, 0, false},
+		{"PT", 0, 0, false},
+		{"1H", 0, 0, false},
+		{"P1WT1H", 0, 0, false},
+	}
+	for _, tc := range tests {
+		days, clock, ok := calendar.ParseIcalDuration(tc.in)
+		assert.Equal(t, tc.ok, ok, "ok for %q", tc.in)
+		assert.Equal(t, tc.days, days, "days for %q", tc.in)
+		assert.Equal(t, tc.clock, clock, "clock for %q", tc.in)
+	}
+}
+
+// TestEventsFromCal_Duration verifies DTSTART+DURATION events get an End, so
+// they stay visible while running and span the days they cover.
+func TestEventsFromCal_Duration(t *testing.T) {
+	t.Parallel()
+
+	body := `BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+UID:timed-dur@test
+SUMMARY:Timed duration
+DTSTART:20260602T100000Z
+DURATION:PT1H30M
+END:VEVENT
+BEGIN:VEVENT
+UID:allday-dur@test
+SUMMARY:All-day duration
+DTSTART;VALUE=DATE:20260603
+DURATION:P3D
+END:VEVENT
+BEGIN:VEVENT
+UID:weekly-dur@test
+SUMMARY:Weekly duration
+DTSTART:20260601T090000Z
+DURATION:PT45M
+RRULE:FREQ=WEEKLY;COUNT=2
+END:VEVENT
+END:VCALENDAR`
+	events := eventsFromICS(t, body, anchor, anchor.AddDate(0, 0, 30))
+
+	require.Equal(t, 1, countTitle(events, "Timed duration"))
+	require.Equal(t, 1, countTitle(events, "All-day duration"))
+	require.Equal(t, 2, countTitle(events, "Weekly duration"))
+	for _, e := range events {
+		switch e.Title {
+		case "Timed duration":
+			assert.Equal(t, 90*time.Minute, e.End.Sub(e.Start))
+		case "All-day duration":
+			assert.True(t, e.AllDay)
+			assert.Equal(t, time.Date(2026, 6, 6, 0, 0, 0, 0, time.UTC), e.End)
+		case "Weekly duration":
+			assert.Equal(t, 45*time.Minute, e.End.Sub(e.Start))
+		}
+	}
+}
+
+// TestEventsFromCal_DTEndWinsOverDuration verifies DTEND is used when both
+// are present (invalid per RFC 5545, but seen in the wild).
+func TestEventsFromCal_DTEndWinsOverDuration(t *testing.T) {
+	t.Parallel()
+
+	body := `BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+UID:both@test
+SUMMARY:Both
+DTSTART:20260602T100000Z
+DTEND:20260602T110000Z
+DURATION:PT3H
+END:VEVENT
+END:VCALENDAR`
+	events := eventsFromICS(t, body, anchor, anchor.AddDate(0, 0, 30))
+	require.Len(t, events, 1)
+	assert.Equal(t, time.Hour, events[0].End.Sub(events[0].Start))
+}
+
+// TestEventsFromCal_TitleWhitespaceCollapsed verifies escaped newlines and
+// runs of whitespace in SUMMARY render as single spaces.
+func TestEventsFromCal_TitleWhitespaceCollapsed(t *testing.T) {
+	t.Parallel()
+
+	body := "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:ws@test\r\n" +
+		`SUMMARY:  Line one\nLine two	 end ` + "\r\n" +
+		"DTSTART:20260602T100000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+	events := eventsFromICS(t, body, anchor, anchor.AddDate(0, 0, 30))
+	require.Len(t, events, 1)
+	assert.Equal(t, "Line one Line two end", events[0].Title)
+}

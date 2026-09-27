@@ -9,6 +9,8 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -25,7 +27,12 @@ const (
 	icalUserAgent = "calendar-display"
 	maxICalBytes  = 10 << 20
 	hoursPerDay   = 24
+	daysPerWeek   = 7
 )
+
+// icalDurationRe matches an RFC 5545 dur-value: [+-]P then weeks alone, or
+// days and/or a T-prefixed hours/minutes/seconds part.
+var icalDurationRe = regexp.MustCompile(`^([+-])?P(?:(\d+)W|(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?)$`)
 
 // redactURL strips the request URL from net/http errors. The iCal URL is a
 // bearer token and must not reach logs or /healthz.
@@ -283,7 +290,9 @@ func occurrenceInstance(base event, occ time.Time, dur time.Duration, loc *time.
 func parseIcalEvent(comp *ics.VEvent, loc *time.Location) (event, bool) {
 	title := ""
 	if s := comp.GetProperty(ics.ComponentPropertySummary); s != nil {
-		title = strings.TrimSpace(s.Value)
+		// Collapse whitespace: golang-ical unescapes \n into a real newline,
+		// which would render as a missing glyph.
+		title = strings.Join(strings.Fields(s.Value), " ")
 	}
 
 	startProp := comp.GetProperty(ics.ComponentPropertyDtStart)
@@ -301,8 +310,36 @@ func parseIcalEvent(comp *ics.VEvent, loc *time.Location) (event, bool) {
 		if end, _, ok := parseIcalTime(endProp, loc); ok {
 			ev.End = end
 		}
+	} else if durProp := comp.GetProperty(ics.ComponentPropertyDuration); durProp != nil {
+		if days, clock, ok := parseIcalDuration(strings.TrimSpace(durProp.Value)); ok {
+			// Day parts are nominal (wall-clock) per RFC 5545, so DST days
+			// don't shift all-day ends off midnight.
+			ev.End = start.AddDate(0, 0, days).Add(clock)
+		}
 	}
 	return ev, true
+}
+
+// parseIcalDuration parses an RFC 5545 DURATION value into whole days (weeks
+// included) and a clock duration. Returns ok=false for malformed values,
+// including "P" or "PT" with no components.
+func parseIcalDuration(s string) (int, time.Duration, bool) {
+	m := icalDurationRe.FindStringSubmatch(s)
+	if m == nil || strings.HasSuffix(s, "P") || strings.HasSuffix(s, "T") {
+		return 0, 0, false
+	}
+	num := func(v string) int {
+		n, _ := strconv.Atoi(v)
+		return n
+	}
+	days := num(m[2])*daysPerWeek + num(m[3])
+	clock := time.Duration(num(m[4]))*time.Hour +
+		time.Duration(num(m[5]))*time.Minute +
+		time.Duration(num(m[6]))*time.Second
+	if m[1] == "-" {
+		days, clock = -days, -clock
+	}
+	return days, clock, true
 }
 
 // parseIcalTime parses a DTSTART or DTEND iCal property into a time.Time.

@@ -167,6 +167,9 @@ func RequestLogLine(r *http.Request, status int, d time.Duration) string {
 	return requestLogLine(r, status, d)
 }
 
+// ParseIcalDuration wraps parseIcalDuration for blackbox tests.
+func ParseIcalDuration(s string) (int, time.Duration, bool) { return parseIcalDuration(s) }
+
 // SleepSeconds wraps sleepSeconds for blackbox tests.
 func SleepSeconds(now time.Time) int { return sleepSeconds(now) }
 

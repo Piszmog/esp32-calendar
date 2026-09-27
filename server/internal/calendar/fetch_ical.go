@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"strings"
@@ -23,6 +24,7 @@ var (
 const (
 	icalUserAgent = "calendar-display"
 	maxICalBytes  = 10 << 20
+	hoursPerDay   = 24
 )
 
 // redactURL strips the request URL from net/http errors. The iCal URL is a
@@ -90,9 +92,34 @@ func eventsFromCal(cal *ics.Calendar, loc *time.Location, timeMin, timeMax time.
 		if ev.Title == "" {
 			ev.Title = "(no title)"
 		}
-		out = append(out, expandRecurring(comp, ev, loc, timeMin, timeMax, overrides)...)
+		for _, inst := range expandRecurring(comp, ev, loc, timeMin, timeMax, overrides) {
+			out = append(out, inLoc(inst, loc))
+		}
 	}
 	return out
+}
+
+// inLoc returns ev with its times in loc. Events are parsed in their own zone
+// so recurrences expand on the right wall clock; the rest of the package
+// expects loc.
+func inLoc(ev event, loc *time.Location) event {
+	ev.Start = ev.Start.In(loc)
+	if !ev.End.IsZero() {
+		ev.End = ev.End.In(loc)
+	}
+	return ev
+}
+
+// anchorFloating re-reads a time golang-ical parsed in time.Local — a
+// floating datetime or a DATE value — as the same wall clock in loc, which is
+// how parseIcalTime reads DTSTART. Times with a TZID or Z are returned as-is.
+func anchorFloating(t time.Time, loc *time.Location) time.Time {
+	if t.Location() != time.Local {
+		return t
+	}
+	y, mo, d := t.Date()
+	h, mi, sec := t.Clock()
+	return time.Date(y, mo, d, h, mi, sec, t.Nanosecond(), loc)
 }
 
 // isCancelled reports whether the VEVENT has STATUS:CANCELLED.
@@ -119,11 +146,7 @@ func collectRecurrenceOverrides(cal *ics.Calendar, loc *time.Location) map[strin
 		if err != nil {
 			continue
 		}
-		// Normalize to loc so time.Equal matches rrule-go occurrences, which
-		// are generated in loc (from base.Start). golang-ical uses time.Local
-		// for floating datetimes; without this, ExDate silently fails to fire
-		// when time.Local != loc.
-		m[uidProp.Value] = append(m[uidProp.Value], t.In(loc))
+		m[uidProp.Value] = append(m[uidProp.Value], anchorFloating(t, loc))
 	}
 	return m
 }
@@ -136,6 +159,9 @@ func collectRecurrenceOverrides(cal *ics.Calendar, loc *time.Location) map[strin
 func expandRecurring(comp *ics.VEvent, base event, loc *time.Location, timeMin, timeMax time.Time, overrides map[string][]time.Time) []event {
 	rruleProp := comp.GetProperty(ics.ComponentPropertyRrule)
 	rdates, _ := comp.GetRDates()
+	for i, t := range rdates {
+		rdates[i] = anchorFloating(t, loc)
+	}
 	if rruleProp == nil && len(rdates) == 0 {
 		return nonRecurringInWindow(base, timeMin, timeMax)
 	}
@@ -143,7 +169,7 @@ func expandRecurring(comp *ics.VEvent, base event, loc *time.Location, timeMin, 
 	if p := comp.GetProperty(ics.ComponentPropertyUniqueId); p != nil {
 		extraExdates = overrides[p.Value]
 	}
-	set, hasRules := buildRRuleSet(base.Start, rruleProp, rdates, comp, extraExdates)
+	set, hasRules := buildRRuleSet(base.Start, rruleProp, rdates, comp, extraExdates, loc)
 	if !hasRules {
 		// RRULE/RDATE failed to parse; fall back to the single DTSTART occurrence
 		// so the event is visible rather than silently disappearing.
@@ -172,7 +198,7 @@ func nonRecurringInWindow(base event, timeMin, timeMax time.Time) []event {
 // and EXDATE properties, plus any extra EXDATE times from RECURRENCE-ID overrides.
 // Returns the set and whether at least one rule or RDATE was successfully added
 // (false means the RRULE failed to parse and no RDATEs exist — caller should fall back).
-func buildRRuleSet(dtstart time.Time, rruleProp *ics.IANAProperty, rdates []time.Time, comp *ics.VEvent, extraExdates []time.Time) (rrule.Set, bool) {
+func buildRRuleSet(dtstart time.Time, rruleProp *ics.IANAProperty, rdates []time.Time, comp *ics.VEvent, extraExdates []time.Time, loc *time.Location) (rrule.Set, bool) {
 	var set rrule.Set
 	set.DTStart(dtstart)
 	hasRules := false
@@ -191,7 +217,7 @@ func buildRRuleSet(dtstart time.Time, rruleProp *ics.IANAProperty, rdates []time
 	}
 	if exdates, err := comp.GetExDates(); err == nil {
 		for _, t := range exdates {
-			set.ExDate(t)
+			set.ExDate(anchorFloating(t, loc))
 		}
 	}
 	for _, t := range extraExdates {
@@ -232,9 +258,14 @@ func eventDuration(ev event) time.Duration {
 func occurrenceInstance(base event, occ time.Time, dur time.Duration, loc *time.Location, timeMin time.Time) (event, bool) {
 	inst := base
 	inst.Start = occ.In(loc)
-	if dur > 0 {
+	switch {
+	case base.AllDay && dur > 0:
+		// Count whole days, not hours: a 23h/25h DST day on either the base
+		// event or this occurrence would otherwise shift the end off midnight.
+		inst.End = inst.Start.AddDate(0, 0, int(math.Round(dur.Hours()/hoursPerDay)))
+	case dur > 0:
 		inst.End = occ.Add(dur).In(loc)
-	} else {
+	default:
 		inst.End = time.Time{}
 	}
 	occEnd := inst.End
@@ -298,13 +329,14 @@ func icalPropIsAllDay(prop *ics.IANAProperty, value string) bool {
 	return !strings.Contains(value, "T")
 }
 
-// parseIcalDatetime parses a DATETIME value (not all-day).
-// UTC datetimes end with 'Z'; local datetimes use the TZID from tzids (first
-// entry), falling back to fallbackLoc when absent or unrecognised.
+// parseIcalDatetime parses a DATETIME value (not all-day) in its own zone,
+// so RRULE expansion follows that zone's DST. UTC datetimes end with 'Z';
+// local datetimes use the TZID from tzids (first entry), falling back to
+// fallbackLoc when absent or unrecognised.
 func parseIcalDatetime(value string, tzids []string, fallbackLoc *time.Location) (time.Time, bool) {
 	if strings.HasSuffix(value, "Z") {
 		t, err := time.Parse("20060102T150405Z", value)
-		return t.In(fallbackLoc), err == nil
+		return t, err == nil
 	}
 	loc := fallbackLoc
 	if len(tzids) > 0 {
@@ -313,5 +345,5 @@ func parseIcalDatetime(value string, tzids []string, fallbackLoc *time.Location)
 		}
 	}
 	t, err := time.ParseInLocation("20060102T150405", value, loc)
-	return t.In(fallbackLoc), err == nil
+	return t, err == nil
 }

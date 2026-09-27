@@ -56,6 +56,11 @@ linters:
           - gosec
         text: "G706"
         path: "internal/calendar/server\\.go"
+      # anchorFloating detects golang-ical parsing floating times in time.Local.
+      - linters:
+          - gosmopolitan
+        text: "time.Local"
+        path: "internal/calendar/fetch_ical\\.go"
 formatters:
   enable:
     - gofmt

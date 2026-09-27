@@ -85,9 +85,8 @@ const (
 	batteryLabelGap   = 6.0
 	batteryIconAdv    = batteryBodyW + batteryAfterGap + batteryLabelGap
 
-	// Content limits used in summarizeDay.
+	// Per-event title limit used in summarizeDay.
 	eventListTitleMax = 10
-	summaryMax        = 60
 
 	// WiFi bar counts for rssiToBars.
 	wifiFullBars = 4
@@ -278,7 +277,7 @@ func buildWeekAhead(events []event, startOfToday time.Time, loc *time.Location) 
 		day := startOfToday.AddDate(0, 0, offset)
 		entries := weekDays[offset]
 		byStart(entries)
-		summary, more := summarizeDay(entries)
+		summary, more := summarizeDay(entries, weekSummaryFits)
 		week = append(week, daySummary{
 			Date:    day,
 			Summary: summary,
@@ -289,13 +288,14 @@ func buildWeekAhead(events []event, startOfToday time.Time, loc *time.Location) 
 }
 
 // summarizeDay collapses a day's events to a compact one-liner plus an
-// optional overflow indicator when events don't all fit.
+// optional overflow indicator when events don't all fit. fits reports whether
+// a candidate line fits the space it will be drawn in.
 //
 //	one event:  "10:00  Project sync", ""
 //	many fit:   "9 Standup · 14 1:1 · 16 Demo", ""
 //	overflow:   "9 Standup · 14 1:1", "+ 2 more events"
 //	all-day:    "All-day company offsite", ""
-func summarizeDay(events []event) (string, string) {
+func summarizeDay(events []event, fits func(string) bool) (string, string) {
 	if len(events) == 0 {
 		return "", ""
 	}
@@ -318,23 +318,31 @@ func summarizeDay(events []event) (string, string) {
 		// Truncate title aggressively when many events on a day
 		parts = append(parts, t+" "+truncate(ev.Title, eventListTitleMax))
 	}
-	out := strings.Join(parts, " · ")
-	if len([]rune(out)) <= summaryMax {
-		return out, ""
-	}
-	// Drop events from the tail until the kept portion fits within summaryMax,
-	// then report how many were dropped on a separate line.
-	for k := len(parts) - 1; k >= 1; k-- {
-		candidate := strings.Join(parts[:k], " · ")
-		if len([]rune(candidate)) <= summaryMax {
+	// Drop events from the tail until the kept portion fits, then report how
+	// many were dropped on a separate line. The first event is always kept;
+	// the renderer ellipsizes it if it alone is too wide.
+	for k := len(parts); k > 1; k-- {
+		if candidate := strings.Join(parts[:k], " · "); fits(candidate) {
 			return candidate, moreSuffix(len(parts) - k)
 		}
 	}
-	// Pathological: even the first part alone overflows; fall back to truncation.
-	return truncate(out, summaryMax), ""
+	return parts[0], moreSuffix(len(parts) - 1)
+}
+
+// weekSummaryFits reports whether s fits the Week Ahead column in the face
+// drawWeekAheadPanel uses for summaries. It takes renderMu because faces are
+// shared with renderImage.
+func weekSummaryFits(s string) bool {
+	fs := loadFonts()
+	fs.renderMu.Lock()
+	defer fs.renderMu.Unlock()
+	return float64(font.MeasureString(face(fontSizeWeekSummary, true), s).Ceil()) <= rightW
 }
 
 func moreSuffix(n int) string {
+	if n == 0 {
+		return ""
+	}
 	if n == 1 {
 		return "+ 1 more event"
 	}

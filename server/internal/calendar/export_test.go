@@ -29,7 +29,12 @@ func BuildDisplayData(events []Event, loc *time.Location, batPct, rssi int, now 
 }
 
 // SummarizeDay wraps summarizeDay for blackbox tests.
-func SummarizeDay(events []Event) (string, string) { return summarizeDay(events) }
+func SummarizeDay(events []Event, fits func(string) bool) (string, string) {
+	return summarizeDay(events, fits)
+}
+
+// WeekSummaryFits wraps weekSummaryFits for blackbox tests.
+func WeekSummaryFits(s string) bool { return weekSummaryFits(s) }
 
 // RSSIToBars wraps rssiToBars for blackbox tests.
 func RSSIToBars(rssi int) int { return rssiToBars(rssi) }

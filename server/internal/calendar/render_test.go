@@ -1,6 +1,7 @@
 package calendar_test
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -93,6 +94,10 @@ func TestChipTimeString(t *testing.T) {
 	}
 }
 
+// fitsRunes is a width-free fit check for summarizeDay table tests: a
+// summary fits when it is at most 60 runes.
+func fitsRunes(s string) bool { return len([]rune(s)) <= 60 }
+
 func TestSummarizeDay(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 5, 11, 0, 0, 0, 0, time.UTC)
@@ -183,11 +188,21 @@ func TestSummarizeDay(t *testing.T) {
 			},
 			"10 Abcdefghij · 11 Abcdefghij · 12 Abcdefghij", "+ 2 more events",
 		},
+		{
+			// Even the first part alone is too wide: keep it (the renderer
+			// ellipsizes it) and count the rest.
+			"first part overflows",
+			[]calendar.Event{
+				{AllDay: true, Start: now, Title: strings.Repeat("x", 61)},
+				{Start: time.Date(2026, 5, 11, 10, 0, 0, 0, time.UTC), Title: "Review"},
+			},
+			strings.Repeat("x", 61), "+ 1 more event",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			gotSummary, gotMore := calendar.SummarizeDay(tc.events)
+			gotSummary, gotMore := calendar.SummarizeDay(tc.events, fitsRunes)
 			assert.Equal(t, tc.wantSummary, gotSummary)
 			assert.Equal(t, tc.wantMore, gotMore)
 		})
@@ -331,6 +346,32 @@ func TestBuildDisplayData_WeekAheadSort(t *testing.T) {
 	require.Len(t, d.WeekAhead, 5)
 	// day+2 is index 0, day+3 is index 1.
 	assert.Equal(t, "9 Earlier · 15 Later", d.WeekAhead[1].Summary)
+}
+
+// TestBuildDisplayData_WeekAheadOverflowByWidth verifies that events which
+// don't fit the Week Ahead column's pixel width are counted in More instead of
+// being cut off by the renderer's ellipsis.
+func TestBuildDisplayData_WeekAheadOverflowByWidth(t *testing.T) {
+	t.Parallel()
+	loc := time.UTC
+	now := time.Date(2026, 5, 11, 12, 0, 0, 0, loc)
+
+	// Well under 60 runes joined, but much wider than the column.
+	titles := []string{"Standup", "Design crit", "1:1 Jamie", "Demo prep"}
+	events := make([]calendar.Event, 0, len(titles))
+	for i, title := range titles {
+		events = append(events, calendar.Event{Start: time.Date(2026, 5, 13, 9+2*i, 0, 0, 0, loc), Title: title})
+	}
+
+	d := calendar.BuildDisplayData(events, loc, -1, 0, now)
+	require.Len(t, d.WeekAhead, 5)
+	ds := d.WeekAhead[0]
+	assert.True(t, calendar.WeekSummaryFits(ds.Summary), "summary %q must fit the column", ds.Summary)
+	shown := strings.Count(ds.Summary, " · ") + 1
+	var hidden int
+	_, err := fmt.Sscanf(ds.More, "+ %d more", &hidden)
+	require.NoError(t, err, "More must report the dropped events, got %q", ds.More)
+	assert.Equal(t, len(events), shown+hidden)
 }
 
 func TestBuildDisplayData_BatteryAndWifi(t *testing.T) {

@@ -455,6 +455,46 @@ END:VCALENDAR`
 	assert.Equal(t, 1, count, "malformed RRULE must fall back to DTSTART occurrence, not silently drop the event")
 }
 
+// TestExpandRecurring_AllDayAcrossDST verifies that recurring all-day
+// occurrences keep whole-day spans when the base event or an occurrence falls
+// on a 23h or 25h DST day.
+func TestExpandRecurring_AllDayAcrossDST(t *testing.T) {
+	t.Parallel()
+	loc, err := time.LoadLocation("America/Denver")
+	require.NoError(t, err)
+
+	cases := []struct {
+		name    string
+		dtstart string
+		rrule   string
+		from    time.Time
+	}{
+		// Base day is 2026-03-08, a 23h spring-forward day; 2027-03-08 is not.
+		{"base on spring-forward", "20260308", "FREQ=YEARLY", time.Date(2027, 3, 7, 0, 0, 0, 0, loc)},
+		// Base day is a normal 24h day; the 2026-11-01 occurrence is 25h.
+		{"occurrence on fall-back", "20261025", "FREQ=WEEKLY;COUNT=3", time.Date(2026, 10, 31, 0, 0, 0, 0, loc)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			start, err := time.ParseInLocation("20060102", tc.dtstart, loc)
+			require.NoError(t, err)
+			body := "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nUID:dst@test\nSUMMARY:Birthday\n" +
+				"DTSTART;VALUE=DATE:" + tc.dtstart + "\n" +
+				"DTEND;VALUE=DATE:" + start.AddDate(0, 0, 1).Format("20060102") + "\n" +
+				"RRULE:" + tc.rrule + "\nEND:VEVENT\nEND:VCALENDAR"
+			events, err := calendar.EventsFromICS(body, loc, tc.from, tc.from.AddDate(0, 0, 3))
+			require.NoError(t, err)
+			require.Len(t, events, 1)
+			ev := events[0]
+			assert.Equal(t, ev.Start.AddDate(0, 0, 1), ev.End, "all-day occurrence must end at the next midnight")
+
+			d := calendar.BuildDisplayData(events, loc, -1, 0, ev.Start.Add(12*time.Hour))
+			assert.Len(t, d.Today, 1, "all-day occurrence must show on its day")
+		})
+	}
+}
+
 func TestFetchEventsIcal_SendsUserAgent(t *testing.T) {
 	t.Parallel()
 
@@ -493,4 +533,89 @@ func TestFetchEventsIcal_ErrorOmitsURL(t *testing.T) {
 	_, err := calendar.FetchEventsIcal(t.Context(), srv.URL+"/private-secret-token/basic.ics", time.UTC)
 	require.Error(t, err)
 	assert.NotContains(t, err.Error(), "secret-token")
+}
+
+// notLocal returns a fixed zone five hours ahead of time.Local, so floating
+// iCal times parsed in time.Local land on the wrong instant unless they are
+// re-anchored to the configured zone.
+func notLocal() *time.Location {
+	_, off := time.Now().Zone()
+	return time.FixedZone("not-local", off+5*60*60)
+}
+
+// TestExpandRecurring_FloatingExclusionsUseConfiguredZone verifies that
+// floating and all-day EXDATE / RECURRENCE-ID values are matched in the
+// configured zone, not the host's time.Local.
+func TestExpandRecurring_FloatingExclusionsUseConfiguredZone(t *testing.T) {
+	t.Parallel()
+	loc := notLocal()
+	from := time.Date(2026, 6, 1, 0, 0, 0, 0, loc)
+
+	allDay := `BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+UID:allday-exdate@test
+SUMMARY:Gym
+DTSTART;VALUE=DATE:20260601
+DTEND;VALUE=DATE:20260602
+RRULE:FREQ=WEEKLY;COUNT=3
+EXDATE;VALUE=DATE:20260608
+END:VEVENT
+END:VCALENDAR`
+	events, err := calendar.EventsFromICS(allDay, loc, from, from.AddDate(0, 0, 21))
+	require.NoError(t, err)
+	assert.Equal(t, 2, countTitle(events, "Gym"), "all-day EXDATE must exclude 2026-06-08")
+
+	floating := `BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+UID:floating@test
+SUMMARY:Sync
+DTSTART:20260601T100000
+DTEND:20260601T103000
+RRULE:FREQ=WEEKLY;COUNT=3
+END:VEVENT
+BEGIN:VEVENT
+UID:floating@test
+RECURRENCE-ID:20260608T100000
+SUMMARY:Sync moved
+DTSTART:20260608T140000
+DTEND:20260608T143000
+END:VEVENT
+END:VCALENDAR`
+	events, err = calendar.EventsFromICS(floating, loc, from, from.AddDate(0, 0, 21))
+	require.NoError(t, err)
+	assert.Equal(t, 2, countTitle(events, "Sync"), "floating RECURRENCE-ID must suppress the base slot")
+	assert.Equal(t, 1, countTitle(events, "Sync moved"))
+}
+
+// TestExpandRecurring_ExpandsInEventZone verifies that a series defined in
+// another zone keeps its own wall-clock time when the two zones change DST on
+// different dates.
+func TestExpandRecurring_ExpandsInEventZone(t *testing.T) {
+	t.Parallel()
+	denver, err := time.LoadLocation("America/Denver")
+	require.NoError(t, err)
+	london, err := time.LoadLocation("Europe/London")
+	require.NoError(t, err)
+
+	// Weekly 09:00 London from 2026-02-02. The US springs forward on
+	// 2026-03-08, the UK on 2026-03-29; 2026-03-16 falls in between.
+	body := `BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+UID:london@test
+SUMMARY:London call
+DTSTART;TZID=Europe/London:20260202T090000
+DTEND;TZID=Europe/London:20260202T093000
+RRULE:FREQ=WEEKLY
+END:VEVENT
+END:VCALENDAR`
+	from := time.Date(2026, 3, 15, 0, 0, 0, 0, denver)
+	events, err := calendar.EventsFromICS(body, denver, from, from.AddDate(0, 0, 3))
+	require.NoError(t, err)
+	require.Len(t, events, 1)
+	ev := events[0]
+	assert.Equal(t, 9, ev.Start.In(london).Hour(), "occurrence must stay at 09:00 London")
+	assert.Equal(t, denver, ev.Start.Location(), "events are normalized to the configured zone")
 }

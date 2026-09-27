@@ -1,7 +1,8 @@
 /*
  * FireBeetle 2 ESP32-E + Waveshare 7.5" e-paper calendar client
  *
- * Wakes from deep sleep aligned to :00/:30 wall-clock marks, downloads a packed 1-bit
+ * Wakes from deep sleep aligned to :00/:30 wall-clock marks (the server says how
+ * long to sleep via X-Sleep-Seconds), downloads a packed 1-bit
  * 800x480 bitmap from the calendar server (with current battery% and WiFi RSSI
  * as query params so the server can render them into the status bar),
  * pushes it to the display, sleeps.
@@ -32,11 +33,13 @@
 #include "esp_sleep.h"
 #include "esp_task_wdt.h"
 #include "driver/gpio.h"
-#include <time.h>
 
 // ============ USER CONFIG ============
 #include "secrets.h"
 const uint16_t SERVER_PORT = 8080;
+#ifndef AUTH_TOKEN
+#define AUTH_TOKEN ""   // older secrets.h without a token: send none
+#endif
 // =====================================
 
 // Pin map
@@ -59,18 +62,28 @@ constexpr uint32_t IMG_H = 480;
 constexpr uint32_t BUF_BYTES = IMG_W * IMG_H / 8;   // 48000
 
 // Whole wake cycle must finish within this, or the task watchdog resets the
-// board (worst case: 28 s WiFi + 2 s NTP + 20 s fetch + ~20 s display).
+// board (worst case: 28 s WiFi + 20 s fetch + ~20 s display).
 constexpr uint32_t WDT_TIMEOUT_MS = 120000;
 
 // Single deadline for the HTTP fetch, from request start to last byte.
 constexpr uint32_t FETCH_DEADLINE_MS = 20000;
 
-// Below LOW_BATT_MV the board shows a "charge me" screen and sleeps until
-// reset, instead of browning out on every wake. Readings under
-// NO_BATT_SENSE_MV mean the battery-sense divider is absent (some clones),
-// so the cutoff is skipped rather than bricking the board.
-constexpr uint32_t LOW_BATT_MV      = 3400;
-constexpr uint32_t NO_BATT_SENSE_MV = 2500;
+// Below LOW_BATT_MV the board shows a "charge me" screen once, then only
+// re-checks the battery every LOW_BATT_RECHECK_S instead of browning out on
+// every wake. It resumes once the battery reaches LOW_BATT_RECOVER_MV (the
+// gap stops it flapping around the cutoff). Readings under NO_BATT_SENSE_MV
+// mean the battery-sense divider is absent (some clones), so the cutoff is
+// skipped rather than bricking the board.
+constexpr uint32_t LOW_BATT_MV         = 3400;
+constexpr uint32_t LOW_BATT_RECOVER_MV = 3600;
+constexpr uint32_t NO_BATT_SENSE_MV    = 2500;
+constexpr uint64_t LOW_BATT_RECHECK_S  = 2ULL * 60ULL * 60ULL;
+
+// Sleep used when the server's X-Sleep-Seconds header is missing or out of
+// range (MIN_SLEEP_S..MAX_SLEEP_S).
+constexpr uint64_t DEFAULT_SLEEP_S = 30ULL * 60ULL;
+constexpr long     MIN_SLEEP_S     = 60;
+constexpr long     MAX_SLEEP_S     = 2L * 60L * 60L;
 
 // Failed wakes back off 5 -> 15 -> 30 -> 60 min. The error screen replaces the
 // calendar only after ERROR_SCREEN_AFTER consecutive failures, and is drawn
@@ -82,26 +95,12 @@ RTC_DATA_ATTR uint8_t rtcFailCount   = 0;
 RTC_DATA_ATTR bool    rtcErrorShown  = false;
 RTC_DATA_ATTR uint8_t rtcBssid[6]    = {0};
 RTC_DATA_ATTR int32_t rtcChannel     = 0;   // 0 = no cached AP
+RTC_DATA_ATTR bool    rtcLowBattShown = false;
 
 void goToSleep(uint64_t seconds) {
     Serial.flush();
     esp_sleep_enable_timer_wakeup(seconds * 1000000ULL);
     esp_deep_sleep_start();
-}
-
-// Returns seconds until the next :00 or :30 wall-clock mark.
-// Falls back to 30 min if NTP hasn't synced (time < 2024-01-01).
-// Guard: if we're within 60s of a mark, push to the following one to
-// avoid a near-zero sleep after a slow fetch+render cycle.
-uint64_t nextWakeSeconds() {
-    time_t now = time(nullptr);
-    if (now < 1704067200) return 30ULL * 60ULL;
-    struct tm t;
-    gmtime_r(&now, &t);
-    int secsPastMark = (t.tm_min % 30) * 60 + t.tm_sec;
-    int secsToMark   = (30 * 60) - secsPastMark;
-    if (secsToMark < 60) secsToMark += 30 * 60;
-    return (uint64_t)secsToMark;
 }
 
 // Returns seconds to sleep after the given number of consecutive failures.
@@ -128,6 +127,7 @@ bool waitForWiFi(uint32_t timeoutMs) {
 // Connects using the AP (BSSID + channel) cached from the last wake, which
 // skips the scan; falls back to a full scan if that fails.
 bool connectWiFi() {
+    WiFi.persistent(false);   // don't rewrite credentials to NVS flash every wake
     WiFi.mode(WIFI_STA);
     if (rtcChannel > 0) {
         WiFi.begin(WIFI_SSID, WIFI_PASS, rtcChannel, rtcBssid);
@@ -184,7 +184,10 @@ int batteryPercent(uint32_t mv) {
     return 0;
 }
 
-bool fetchImage(uint8_t* buf, int batPct, int rssi, char* reason, size_t reasonLen) {
+// On success, *sleepSecs is the server's X-Sleep-Seconds, or DEFAULT_SLEEP_S
+// when that header is absent or out of range.
+bool fetchImage(uint8_t* buf, int batPct, int rssi, uint64_t* sleepSecs,
+                char* reason, size_t reasonLen) {
     char url[160];
     snprintf(url, sizeof(url),
              "http://%s:%u/calendar.bin?bat=%d&rssi=%d",
@@ -200,6 +203,11 @@ bool fetchImage(uint8_t* buf, int batPct, int rssi, char* reason, size_t reasonL
         Serial.println(reason);
         return false;
     }
+    if (AUTH_TOKEN[0] != '\0') {
+        http.addHeader("Authorization", String("Bearer ") + AUTH_TOKEN);
+    }
+    const char* headerKeys[] = {"X-Sleep-Seconds"};
+    http.collectHeaders(headerKeys, 1);
 
     int code = http.GET();
     if (code != HTTP_CODE_OK) {
@@ -212,6 +220,11 @@ bool fetchImage(uint8_t* buf, int batPct, int rssi, char* reason, size_t reasonL
         http.end();
         return false;
     }
+    long serverSleep = http.header("X-Sleep-Seconds").toInt();
+    *sleepSecs = (serverSleep >= MIN_SLEEP_S && serverSleep <= MAX_SLEEP_S)
+                     ? (uint64_t)serverSleep
+                     : DEFAULT_SLEEP_S;
+
     int len = http.getSize();
     if (len != (int)BUF_BYTES) {
         snprintf(reason, reasonLen, "size %d, expected %u", len, BUF_BYTES);
@@ -241,6 +254,7 @@ bool fetchImage(uint8_t* buf, int batPct, int rssi, char* reason, size_t reasonL
     http.end();
     if (got != BUF_BYTES) {
         snprintf(reason, reasonLen, "read %u/%u bytes (timeout)", got, BUF_BYTES);
+        Serial.println(reason);
     }
     Serial.printf("read %u/%u bytes\n", got, BUF_BYTES);
     return got == BUF_BYTES;
@@ -317,14 +331,18 @@ void setup() {
     int batPct = batteryPercent(mv);
     Serial.printf("battery: %u mV (%d%%)\n", mv, batPct);
 
-    if (mv > NO_BATT_SENSE_MV && mv < LOW_BATT_MV) {
-        Serial.println("battery low — sleeping until reset");
-        char detail[48];
-        snprintf(detail, sizeof(detail), "%u mV. Charge, then press reset.", mv);
-        drawError("Battery low", detail, "");
-        Serial.flush();
-        esp_deep_sleep_start();   // no wakeup source: sleeps until reset
+    uint32_t lowCutoff = rtcLowBattShown ? LOW_BATT_RECOVER_MV : LOW_BATT_MV;
+    if (mv > NO_BATT_SENSE_MV && mv < lowCutoff) {
+        Serial.println("battery low — rechecking later");
+        if (!rtcLowBattShown) {
+            char detail[48];
+            snprintf(detail, sizeof(detail), "%u mV. Charge to resume.", mv);
+            drawError("Battery low", detail, "");
+            rtcLowBattShown = true;
+        }
+        goToSleep(LOW_BATT_RECHECK_S);
     }
+    rtcLowBattShown = false;
 
     char status[40];
     snprintf(status, sizeof(status), "battery %d%%", batPct);
@@ -335,19 +353,14 @@ void setup() {
     Serial.printf("rssi: %d dBm\n", rssi);
     snprintf(status, sizeof(status), "battery %d%%  rssi %d dBm", batPct, rssi);
 
-    configTime(0, 0, "pool.ntp.org", "time.google.com");
-    for (int i = 0; i < 20 && time(nullptr) < 1704067200; i++) delay(100);
-    if (time(nullptr) < 1704067200) {
-        Serial.println("warning: NTP not synced, next wake not aligned to :00/:30");
-    }
-
     uint8_t* buf = (uint8_t*)malloc(BUF_BYTES);
     if (!buf) {
         failAndSleep("Out of memory", "malloc failed", status);
     }
 
     char reason[64];
-    if (!fetchImage(buf, batPct, rssi, reason, sizeof(reason))) {
+    uint64_t sleepSecs = DEFAULT_SLEEP_S;
+    if (!fetchImage(buf, batPct, rssi, &sleepSecs, reason, sizeof(reason))) {
         free(buf);
         failAndSleep("Calendar fetch failed", reason, status);
     }
@@ -358,7 +371,6 @@ void setup() {
     rtcErrorShown = false;
     WiFi.disconnect(true);
     WiFi.mode(WIFI_OFF);
-    uint64_t sleepSecs = nextWakeSeconds();
     Serial.printf("sleeping %llus\n", sleepSecs);
     goToSleep(sleepSecs);
 }

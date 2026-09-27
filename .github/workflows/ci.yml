@@ -23,7 +23,9 @@ jobs:
       - name: Lint
         uses: golangci/golangci-lint-action@v9
         with:
-          version: latest
+          # Pinned: with linters.default: all, a new release can add linters
+          # and fail CI with no code change. Dependabot doesn't bump this.
+          version: v2.13.2
           working-directory: server
   test:
     name: Test
@@ -59,7 +61,9 @@ jobs:
               source-url: https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
           libraries: |
             - name: GxEPD2
+              version: 1.6.9
             - name: Adafruit GFX Library
+              version: 1.12.6
           sketch-paths: |
             - firmware/firebeetle_calendar
   release-dryrun:

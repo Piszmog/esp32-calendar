@@ -134,6 +134,9 @@ The file should look like:
 
 ```sh
 ICAL_URL=https://calendar.google.com/calendar/ical/<id>/private-<token>/basic.ics
+# Optional: require this token on /calendar.* (set the same AUTH_TOKEN in the
+# firmware's secrets.h; add ?token=... when previewing in a browser)
+AUTH_TOKEN=
 ```
 
 ### Install the systemd unit
@@ -231,7 +234,7 @@ On Apple Silicon you may need to approve it once under **System Settings → Pri
 | Timezone | `-tz` flag in `deploy/calendar.service` |
 | How often the server polls the iCal feed | `-fetch-interval` flag (default `10m`) |
 | Which calendar | Set `ICAL_URL` in `~/calendar/calendar.env` to that calendar's **Secret address in iCal format** (Settings → Integrate calendar) |
-| How often the display refreshes | Fixed: aligns to the next :00/:30 wall-clock mark (≈30 min). To change the cadence, edit `nextWakeSeconds()` in the `.ino`. |
+| How often the display refreshes | Aligns to the next :00/:30 mark in the server's `-tz` (≈30 min); the server sends the sleep time as `X-Sleep-Seconds`. To change the cadence, edit `wakeMark` in `server/internal/calendar/server.go`. |
 | Past-event cutoff | `now.Add(-30 * time.Minute)` in `server/internal/calendar/render.go` |
 
 To preview layout changes without flashing: run the server locally with
@@ -286,7 +289,8 @@ A 2000 mAh LiPo gets ~80 days between charges; a 5000 mAh battery gets 6+ months
   5, then 15, 30, and 60 minutes. The last calendar stays on screen until 3
   failures in a row, then an error screen is drawn once.
 - **Low-battery cutoff.** Below 3.4 V the display shows "Battery low" and the
-  board sleeps until you charge it and press reset.
+  board only re-checks the battery every 2 hours. It resumes on its own once
+  the battery is back above 3.6 V.
 
 ## 9. Enclosure
 
@@ -305,7 +309,7 @@ A 2000 mAh LiPo gets ~80 days between charges; a 5000 mAh battery gets 6+ months
 | Serial shows HTTP 404 or connection refused | `SERVER_HOST` wrong, or service not running — `systemctl status calendar` on the Pi |
 | ESP32 boots but display stays blank | Re-check wiring (section 2), or a pack/draw convention mismatch (see DEVELOPMENT.md) |
 | Image is inverted | In the firmware, swap `drawInvertedBitmap` → `drawBitmap` |
-| Display says "Battery low" | Charge the LiPo, then press the FireBeetle's reset button — the board doesn't wake on its own after a low-battery cutoff |
+| Display says "Battery low" | Charge the LiPo; the board re-checks every 2 hours and resumes on its own (press reset to resume immediately) |
 | Battery reads 0% always | Confirm your FireBeetle has the battery sense voltage divider on GPIO34 (some clones omit it); adjust calibration in `batteryPercent()` in the `.ino` |
 | Battery icon obviously wrong | Adjust the LiPo curve in `batteryPercent()` in the `.ino` |
 | `arduino-cli` can't find the board | macOS CP2102 driver approval (see section 5); re-run `arduino-cli board list` |

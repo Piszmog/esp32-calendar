@@ -107,17 +107,19 @@ where the bit is 0. If either side changes this convention, the image inverts.
 `truetype.Parse` on the embedded TTFs and panics on failure; `Run` calls it at
 startup. Don't remove the embedded font files under `internal/calendar/fonts/`.
 
-**Past-event cutoff.** Events starting more than 30 minutes ago are hidden. The
-constant is `now.Add(-30 * time.Minute)` in `render.go:buildDisplayData`.
+**Past-event cutoff.** Timed events starting more than 30 minutes ago are
+hidden unless they are still running (`End` in the future). The constant is
+`now.Add(-30 * time.Minute)` in `render.go:buildDisplayData`.
 
 **Startup is fail-fast.** `Run` validates the timezone and performs an initial
 synchronous calendar fetch; a misconfiguration fails immediately rather than
 serving a stale image.
 
-**HTTP endpoints are unauthenticated.** The default `-listen :8080` binds to all
-interfaces — anyone on the LAN can fetch `/calendar.bin` (which contains event
-titles) or the PNG preview. Bind to `127.0.0.1:8080` and front with a reverse
-proxy if this is a concern.
+**HTTP auth is optional.** By default `-listen :8080` serves everything to the
+LAN, including `/calendar.bin` (event titles). Set `AUTH_TOKEN` in
+`calendar.env` and the same value in the firmware's `secrets.h` to require
+`Authorization: Bearer <token>` (or `?token=` for browser previews) on
+`/calendar.*`. `/healthz` stays open.
 
 **Export surface is intentionally minimal.** `Config`, `Run` is the full public
 API. Don't add exports unless `cmd/server` genuinely needs them.
@@ -144,7 +146,9 @@ GITHUB_TOKEN=ghp_... goreleaser release --clean    # from repo root
 ## Linter notes
 
 `server/.golangci.yml` runs with `default: all` — every linter is on unless
-explicitly disabled.
+explicitly disabled. CI pins the golangci-lint version (in `ci.yml` and
+`release.yml`); Dependabot doesn't bump it, so update both by hand. The same
+goes for the GxEPD2 / Adafruit GFX versions in the firmware CI job.
 
 - **`exhaustruct`** — struct literals must fill all fields. Exceptions:
   `net/http.Cookie`, `net/http.Server`, `log/slog.HandlerOptions`.
@@ -161,6 +165,11 @@ Some constants in the `.ino` are a hard contract with the server:
   `drawInvertedBitmap(..., GxEPD_BLACK)`. Flipping either side inverts the image.
 - **Query params:** the ESP32 sends `?bat=NN&rssi=NN`; the server renders these
   into the status bar. Renaming a param requires changes on both sides.
+- **Headers:** the server sends `X-Sleep-Seconds` (the firmware's next sleep);
+  the firmware sends `Authorization: Bearer <AUTH_TOKEN>` when configured.
+
+`internal/calendar/protocol_test.go` reads the `.ino` and fails if any of these
+drift apart.
 
 When a change touches any of the above, deploy in this order:
 

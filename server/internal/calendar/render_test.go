@@ -218,6 +218,70 @@ func TestBuildDisplayData_PastEventCutoff(t *testing.T) {
 	assert.NotContains(t, titles, "Old")
 }
 
+func TestBuildDisplayData_OngoingEventStaysVisible(t *testing.T) {
+	t.Parallel()
+	loc := time.UTC
+	now := time.Date(2026, 5, 11, 12, 0, 0, 0, loc)
+
+	events := []calendar.Event{
+		// Started 2h ago, ends in 1h — still running, must stay in Today.
+		{Start: now.Add(-2 * time.Hour), End: now.Add(time.Hour), Title: "Workshop"},
+		// Started 2h ago, ended 5 min ago — over, must be hidden.
+		{Start: now.Add(-2 * time.Hour), End: now.Add(-5 * time.Minute), Title: "Finished"},
+	}
+
+	d := calendar.BuildDisplayData(events, loc, -1, 0, now)
+	require.Len(t, d.Today, 1)
+	assert.Equal(t, "Workshop", d.Today[0].Title)
+}
+
+func TestBuildDisplayData_OvernightTimedEvent(t *testing.T) {
+	t.Parallel()
+	loc := time.UTC
+	now := time.Date(2026, 5, 11, 12, 0, 0, 0, loc)
+
+	// Tomorrow 22:00 → day-after 02:00: shows in Tomorrow and on day 2.
+	overnight := calendar.Event{
+		Start: time.Date(2026, 5, 12, 22, 0, 0, 0, loc),
+		End:   time.Date(2026, 5, 13, 2, 0, 0, 0, loc),
+		Title: "Red-eye",
+	}
+
+	d := calendar.BuildDisplayData([]calendar.Event{overnight}, loc, -1, 0, now)
+	require.Len(t, d.Tomorrow, 1)
+	assert.Equal(t, "22:00", calendar.ChipTimeString(d.Tomorrow[0]), "start day keeps its start time")
+	assert.Contains(t, d.WeekAhead[0].Summary, "Red-eye", "continuation day must show the event")
+	assert.NotContains(t, d.WeekAhead[0].Summary, "22:00", "continuation day must not repeat the start time")
+	assert.Empty(t, d.WeekAhead[1].Summary)
+}
+
+func TestBuildDisplayData_MultiDayTimedEvent(t *testing.T) {
+	t.Parallel()
+	loc := time.UTC
+	now := time.Date(2026, 5, 11, 12, 0, 0, 0, loc)
+
+	// Yesterday 09:00 → tomorrow 17:00: today and tomorrow are continuation days.
+	trip := calendar.Event{
+		Start: time.Date(2026, 5, 10, 9, 0, 0, 0, loc),
+		End:   time.Date(2026, 5, 12, 17, 0, 0, 0, loc),
+		Title: "Trip",
+	}
+	// Ends exactly at midnight: must not leak onto the next day.
+	late := calendar.Event{
+		Start: time.Date(2026, 5, 13, 20, 0, 0, 0, loc),
+		End:   time.Date(2026, 5, 14, 0, 0, 0, 0, loc),
+		Title: "Late show",
+	}
+
+	d := calendar.BuildDisplayData([]calendar.Event{trip, late}, loc, -1, 0, now)
+	require.Len(t, d.Today, 1)
+	assert.Equal(t, "all-day", calendar.ChipTimeString(d.Today[0]))
+	require.Len(t, d.Tomorrow, 1)
+	assert.Equal(t, "all-day", calendar.ChipTimeString(d.Tomorrow[0]))
+	assert.Contains(t, d.WeekAhead[0].Summary, "Late show")
+	assert.Empty(t, d.WeekAhead[1].Summary, "event ending at midnight must not appear the next day")
+}
+
 func TestBuildDisplayData_DayBuckets(t *testing.T) {
 	t.Parallel()
 	loc := time.UTC
@@ -352,62 +416,6 @@ func TestBuildDisplayData_NowField(t *testing.T) {
 	d := calendar.BuildDisplayData(nil, loc, -1, 0, now)
 	assert.True(t, d.Now.Equal(now.In(loc)))
 	assert.Equal(t, loc, d.Now.Location())
-}
-
-func TestDaysBetween(t *testing.T) {
-	t.Parallel()
-	la, err := time.LoadLocation("America/Los_Angeles")
-	require.NoError(t, err)
-
-	cases := []struct {
-		name string
-		a, b time.Time
-		want int
-	}{
-		{
-			"same day", time.Date(2026, 5, 11, 0, 0, 0, 0, time.UTC),
-			time.Date(2026, 5, 11, 23, 59, 0, 0, time.UTC), 0,
-		},
-		{
-			"tomorrow UTC", time.Date(2026, 5, 11, 0, 0, 0, 0, time.UTC),
-			time.Date(2026, 5, 12, 0, 0, 0, 0, time.UTC), 1,
-		},
-		{
-			"yesterday UTC", time.Date(2026, 5, 12, 0, 0, 0, 0, time.UTC),
-			time.Date(2026, 5, 11, 0, 0, 0, 0, time.UTC), -1,
-		},
-		{
-			"one week", time.Date(2026, 5, 11, 0, 0, 0, 0, time.UTC),
-			time.Date(2026, 5, 18, 0, 0, 0, 0, time.UTC), 7,
-		},
-		// Spring-forward: 2026-03-08 02:00 PST → 03:00 PDT in America/Los_Angeles.
-		// Midnights are 23h apart; int(23/24)=0 with the old Hours/24 formula.
-		{
-			"spring-forward day → tomorrow",
-			time.Date(2026, 3, 8, 0, 0, 0, 0, la),
-			time.Date(2026, 3, 9, 0, 0, 0, 0, la),
-			1,
-		},
-		// Fall-back: 2026-11-01 02:00 PDT → 01:00 PST. Midnights are 25h apart.
-		{
-			"fall-back day → tomorrow",
-			time.Date(2026, 11, 1, 0, 0, 0, 0, la),
-			time.Date(2026, 11, 2, 0, 0, 0, 0, la),
-			1,
-		},
-		{
-			"cross-DST week",
-			time.Date(2026, 3, 8, 0, 0, 0, 0, la),
-			time.Date(2026, 3, 15, 0, 0, 0, 0, la),
-			7,
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			assert.Equal(t, tc.want, calendar.DaysBetween(tc.a, tc.b))
-		})
-	}
 }
 
 func TestBuildDisplayData_DST(t *testing.T) {

@@ -78,6 +78,11 @@ func eventsFromCal(cal *ics.Calendar, loc *time.Location, timeMin, timeMax time.
 	overrides := collectRecurrenceOverrides(cal, loc)
 	var out []event
 	for _, comp := range cal.Events() {
+		// Cancelled overrides still feed collectRecurrenceOverrides above, so
+		// the base-series slot they replace stays suppressed.
+		if isCancelled(comp) {
+			continue
+		}
 		ev, ok := parseIcalEvent(comp, loc)
 		if !ok {
 			continue
@@ -88,6 +93,12 @@ func eventsFromCal(cal *ics.Calendar, loc *time.Location, timeMin, timeMax time.
 		out = append(out, expandRecurring(comp, ev, loc, timeMin, timeMax, overrides)...)
 	}
 	return out
+}
+
+// isCancelled reports whether the VEVENT has STATUS:CANCELLED.
+func isCancelled(comp *ics.VEvent) bool {
+	p := comp.GetProperty(ics.ComponentPropertyStatus)
+	return p != nil && strings.EqualFold(strings.TrimSpace(p.Value), "CANCELLED")
 }
 
 // collectRecurrenceOverrides returns a map of UID → original occurrence times for

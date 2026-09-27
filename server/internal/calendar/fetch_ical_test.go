@@ -388,6 +388,48 @@ END:VCALENDAR`
 	assert.True(t, found, "rescheduled June 8 2pm override must appear")
 }
 
+// TestEventsFromCal_SkipsCancelled verifies that STATUS:CANCELLED events are
+// dropped, including a cancelled override of one recurring instance (whose
+// base slot must stay suppressed).
+func TestEventsFromCal_SkipsCancelled(t *testing.T) {
+	t.Parallel()
+
+	body := `BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+UID:cancelled-single@test
+SUMMARY:Called off
+STATUS:CANCELLED
+DTSTART:20260602T100000Z
+DTEND:20260602T110000Z
+END:VEVENT
+BEGIN:VEVENT
+UID:standup-cancel@test
+SUMMARY:Weekly standup
+DTSTART:20260601T100000Z
+DTEND:20260601T103000Z
+RRULE:FREQ=WEEKLY;COUNT=3
+END:VEVENT
+BEGIN:VEVENT
+UID:standup-cancel@test
+SUMMARY:Weekly standup
+STATUS:cancelled
+DTSTART:20260608T100000Z
+DTEND:20260608T103000Z
+RECURRENCE-ID:20260608T100000Z
+END:VEVENT
+END:VCALENDAR`
+
+	events := eventsFromICS(t, body, anchor, anchor.AddDate(0, 0, 21))
+
+	assert.NotContains(t, eventTitles(events), "Called off")
+	require.Len(t, events, 2, "only June 1 and June 15 standups should remain")
+	cancelled := time.Date(2026, 6, 8, 10, 0, 0, 0, time.UTC)
+	for _, e := range events {
+		assert.False(t, e.Start.UTC().Equal(cancelled), "cancelled June 8 instance must not appear")
+	}
+}
+
 // TestExpandRecurring_RRuleParseErrorFallback verifies that a malformed RRULE
 // falls back to the single DTSTART occurrence instead of silently dropping the event.
 func TestExpandRecurring_RRuleParseErrorFallback(t *testing.T) {

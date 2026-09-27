@@ -59,9 +59,6 @@ func ChipTimeString(ev Event) string { return chipTimeString(ev) }
 // Truncate wraps truncate for blackbox tests.
 func Truncate(s string, n int) string { return truncate(s, n) }
 
-// DaysBetween wraps daysBetween for blackbox tests.
-func DaysBetween(a, b time.Time) int { return daysBetween(a, b) }
-
 // FetchEventsIcal wraps fetchEventsIcal for blackbox tests.
 func FetchEventsIcal(ctx context.Context, url string, loc *time.Location) ([]Event, error) {
 	return fetchEventsIcal(ctx, url, loc)
@@ -148,3 +145,12 @@ func EventsFromICS(body string, loc *time.Location, timeMin, timeMax time.Time) 
 	}
 	return eventsFromCal(cal, loc, timeMin, timeMax), nil
 }
+
+// SleepSeconds wraps sleepSeconds for blackbox tests.
+func SleepSeconds(now time.Time) int { return sleepSeconds(now) }
+
+// ImgW and ImgH expose the bitmap dimensions for the firmware contract test.
+const (
+	ImgW = imgW
+	ImgH = imgH
+)

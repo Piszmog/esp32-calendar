@@ -28,6 +28,7 @@ func main() {
 	flag.StringVar(&cfg.ListenAddr, "listen", ":8080", "HTTP listen address (use 127.0.0.1:PORT to restrict to loopback)")
 	flag.StringVar(&cfg.ICalURL, "ical-url", "", "Secret iCal URL from Google Calendar settings")
 	flag.StringVar(&cfg.Timezone, "tz", "America/Los_Angeles", "IANA timezone, e.g. America/New_York")
+	flag.StringVar(&cfg.AuthToken, "auth-token", "", "Shared secret required on /calendar.* endpoints (prefer AUTH_TOKEN env var)")
 	flag.DurationVar(&cfg.FetchInterval, "fetch-interval", defaultFetchInterval, "How often to poll the iCal feed")
 	flag.Parse()
 
@@ -38,6 +39,9 @@ func main() {
 
 	if cfg.ICalURL == "" {
 		cfg.ICalURL = os.Getenv("ICAL_URL")
+	}
+	if cfg.AuthToken == "" {
+		cfg.AuthToken = os.Getenv("AUTH_TOKEN")
 	}
 
 	log.Printf("calendar-server %s starting", version)

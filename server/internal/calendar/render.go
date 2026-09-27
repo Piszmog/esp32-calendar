@@ -88,7 +88,6 @@ const (
 	// Content limits used in summarizeDay.
 	eventListTitleMax = 10
 	summaryMax        = 60
-	oneDayDuration    = 24 * time.Hour
 
 	// WiFi bar counts for rssiToBars.
 	wifiFullBars = 4
@@ -103,7 +102,22 @@ var fontRegularBytes []byte
 //go:embed fonts/DejaVuSans-Bold.ttf
 var fontBoldBytes []byte
 
-var loadFonts = sync.OnceValues(func() (*truetype.Font, *truetype.Font) {
+type faceKey struct {
+	size float64
+	bold bool
+}
+
+// fontSet holds the parsed fonts and a cache of faces built from them. Each
+// face carries a ~1 MB glyph cache, so building them per call dominated
+// render allocations. Faces mutate that cache and are not goroutine-safe:
+// renderMu serializes renders, and faces must only be used while holding it.
+type fontSet struct {
+	regular, bold *truetype.Font
+	renderMu      sync.Mutex
+	faces         map[faceKey]font.Face
+}
+
+var loadFonts = sync.OnceValue(func() *fontSet {
 	r, err := truetype.Parse(fontRegularBytes)
 	if err != nil {
 		panic(fmt.Errorf("parse regular font: %w", err))
@@ -112,16 +126,23 @@ var loadFonts = sync.OnceValues(func() (*truetype.Font, *truetype.Font) {
 	if err != nil {
 		panic(fmt.Errorf("parse bold font: %w", err))
 	}
-	return r, b
+	return &fontSet{regular: r, bold: b, renderMu: sync.Mutex{}, faces: make(map[faceKey]font.Face)}
 })
 
+// face returns the cached face for size/bold. Callers must hold renderMu.
 func face(size float64, bold bool) font.Face {
-	regular, boldFont := loadFonts()
-	f := regular
-	if bold {
-		f = boldFont
+	fs := loadFonts()
+	k := faceKey{size: size, bold: bold}
+	if f, ok := fs.faces[k]; ok {
+		return f
 	}
-	return truetype.NewFace(f, &truetype.Options{Size: size, DPI: fontDPI, Hinting: font.HintingFull})
+	f := fs.regular
+	if bold {
+		f = fs.bold
+	}
+	ff := truetype.NewFace(f, &truetype.Options{Size: size, DPI: fontDPI, Hinting: font.HintingFull})
+	fs.faces[k] = ff
+	return ff
 }
 
 // displayData is what the renderer consumes — the result of running raw
@@ -143,16 +164,6 @@ type daySummary struct {
 	More    string // overflow count line, e.g. "+ 3 more events"; empty when no overflow
 }
 
-// daysBetween returns the number of calendar days from a to b.
-// Noon UTC as a fixed reference avoids the 23h/25h DST gap between adjacent
-// local midnights (e.g. spring-forward yields 23h between consecutive midnights,
-// which int(hours/24) would truncate to 0 instead of 1).
-func daysBetween(a, b time.Time) int {
-	aD := time.Date(a.Year(), a.Month(), a.Day(), 12, 0, 0, 0, time.UTC)
-	bD := time.Date(b.Year(), b.Month(), b.Day(), 12, 0, 0, 0, time.UTC)
-	return int(bD.Sub(aD) / oneDayDuration)
-}
-
 // allDaySpan returns the [start, end) day boundaries for ev in loc.
 // End is exclusive per Google Calendar convention; defaults to start+1d when absent.
 func allDaySpan(ev event, loc *time.Location) (time.Time, time.Time) {
@@ -164,9 +175,41 @@ func allDaySpan(ev event, loc *time.Location) (time.Time, time.Time) {
 	return start, end
 }
 
+// timedSpan returns the [start, end) day boundaries covered by a timed event
+// in loc. An event ending exactly at midnight does not cover the next day;
+// one with no (or a non-positive) end covers only its start day.
+func timedSpan(ev event, loc *time.Location) (time.Time, time.Time) {
+	s := ev.Start.In(loc)
+	start := time.Date(s.Year(), s.Month(), s.Day(), 0, 0, 0, 0, loc)
+	if !ev.End.After(ev.Start) {
+		return start, start.AddDate(0, 0, 1)
+	}
+	last := ev.End.Add(-time.Nanosecond).In(loc)
+	end := time.Date(last.Year(), last.Month(), last.Day(), 0, 0, 0, 0, loc).AddDate(0, 0, 1)
+	return start, end
+}
+
+// daySpan returns the [start, end) day boundaries ev covers in loc.
+func daySpan(ev event, loc *time.Location) (time.Time, time.Time) {
+	if ev.AllDay {
+		return allDaySpan(ev, loc)
+	}
+	return timedSpan(ev, loc)
+}
+
 // spansDay reports whether the half-open interval [start, end) covers day.
 func spansDay(start, end, day time.Time) bool {
 	return !start.After(day) && day.Before(end)
+}
+
+// onDay returns ev as it should be shown on day. A timed event that began on
+// an earlier day is shown as all-day there, so its start time isn't repeated
+// on continuation days.
+func onDay(ev event, day time.Time) event {
+	if !ev.AllDay && ev.Start.Before(day) {
+		ev.AllDay = true
+	}
+	return ev
 }
 
 // buildDisplayData groups events into the layout's three sections.
@@ -174,7 +217,6 @@ func buildDisplayData(events []event, loc *time.Location, batPct, rssi int, now 
 	now = now.In(loc)
 	year, month, day := now.Date()
 	startOfToday := time.Date(year, month, day, 0, 0, 0, 0, loc)
-	tomorrow := startOfToday.AddDate(0, 0, 1)
 
 	d := displayData{
 		Now:        now,
@@ -187,33 +229,26 @@ func buildDisplayData(events []event, loc *time.Location, batPct, rssi int, now 
 		WifiSignal: rssiToBars(rssi),
 	}
 
-	// Past-event cutoff: hide timed events that started more than 30 min ago.
+	// Past-event cutoff: hide timed events that started more than 30 min ago,
+	// unless they are still running.
 	cutoff := now.Add(-30 * time.Minute)
-	bucketTodayTomorrow(events, &d, startOfToday, tomorrow, cutoff, loc)
+	bucketTodayTomorrow(events, &d, now, cutoff, loc)
 	d.WeekAhead = buildWeekAhead(events, startOfToday, loc)
 	return d
 }
 
-func bucketTodayTomorrow(events []event, d *displayData, startOfToday, tomorrow, cutoff time.Time, loc *time.Location) {
+func bucketTodayTomorrow(events []event, d *displayData, now, cutoff time.Time, loc *time.Location) {
+	year, month, day := now.Date()
+	startOfToday := time.Date(year, month, day, 0, 0, 0, 0, loc)
+	tomorrow := startOfToday.AddDate(0, 0, 1)
 	for _, ev := range events {
-		if ev.AllDay {
-			start, end := allDaySpan(ev, loc)
-			if spansDay(start, end, startOfToday) {
-				d.Today = append(d.Today, ev)
-			}
-			if spansDay(start, end, tomorrow) {
-				d.Tomorrow = append(d.Tomorrow, ev)
-			}
-			continue
+		start, end := daySpan(ev, loc)
+		visible := ev.AllDay || ev.Start.After(cutoff) || ev.End.After(now)
+		if visible && spansDay(start, end, startOfToday) {
+			d.Today = append(d.Today, onDay(ev, startOfToday))
 		}
-		evDay := time.Date(ev.Start.Year(), ev.Start.Month(), ev.Start.Day(), 0, 0, 0, 0, loc)
-		switch daysBetween(startOfToday, evDay) {
-		case 0:
-			if ev.Start.After(cutoff) {
-				d.Today = append(d.Today, ev)
-			}
-		case 1:
-			d.Tomorrow = append(d.Tomorrow, ev)
+		if spansDay(start, end, tomorrow) {
+			d.Tomorrow = append(d.Tomorrow, onDay(ev, tomorrow))
 		}
 	}
 	byStart(d.Today)
@@ -229,18 +264,12 @@ func byStart(events []event) {
 func buildWeekAhead(events []event, startOfToday time.Time, loc *time.Location) []daySummary {
 	weekDays := make(map[int][]event)
 	for _, ev := range events {
-		if ev.AllDay {
-			start, end := allDaySpan(ev, loc)
-			for offset := 2; offset <= 6; offset++ {
-				if spansDay(start, end, startOfToday.AddDate(0, 0, offset)) {
-					weekDays[offset] = append(weekDays[offset], ev)
-				}
+		start, end := daySpan(ev, loc)
+		for offset := 2; offset <= 6; offset++ {
+			day := startOfToday.AddDate(0, 0, offset)
+			if spansDay(start, end, day) {
+				weekDays[offset] = append(weekDays[offset], onDay(ev, day))
 			}
-			continue
-		}
-		evDay := time.Date(ev.Start.Year(), ev.Start.Month(), ev.Start.Day(), 0, 0, 0, 0, loc)
-		if n := daysBetween(startOfToday, evDay); n >= 2 && n <= 6 {
-			weekDays[n] = append(weekDays[n], ev)
 		}
 	}
 
@@ -333,6 +362,10 @@ func rssiToBars(rssi int) int {
 
 // renderImage produces the 800x480 RGBA image of the calendar.
 func renderImage(d displayData) image.Image {
+	fs := loadFonts()
+	fs.renderMu.Lock()
+	defer fs.renderMu.Unlock()
+
 	dc := gg.NewContext(imgW, imgH)
 	dc.SetRGB(1, 1, 1)
 	dc.Clear()

@@ -5,6 +5,7 @@ package calendar
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"image"
@@ -13,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -42,6 +44,12 @@ const (
 	// RSSI (always negative dBm), so 1 is unambiguous.
 	rssiUnknown = 1
 	rssiMin     = -120
+	// wakeMark is the wall-clock cadence the ESP32 aligns its wakes to.
+	wakeMark = 30 * time.Minute
+	// wakeGuard pushes a wake that would land within this of the next mark to
+	// the following one. It exceeds the ESP32 RTC slow-clock drift over one
+	// sleep (~90 s), so an early wake doesn't cause a second full cycle.
+	wakeGuard = 3 * time.Minute
 )
 
 // Config holds all runtime configuration. The zero value is not useful;
@@ -51,6 +59,9 @@ type Config struct {
 	ICalURL       string
 	Timezone      string
 	FetchInterval time.Duration
+	// AuthToken, when non-empty, is required on every endpoint except
+	// /healthz, as "Authorization: Bearer <token>" or "?token=<token>".
+	AuthToken string
 }
 
 // server is the running HTTP service. It holds the most recent batch of
@@ -79,7 +90,7 @@ func Run(cfg Config) error {
 
 	// Parse the embedded fonts now so a bad embed fails at startup, not on
 	// the first request.
-	_, _ = loadFonts()
+	loadFonts()
 
 	s := &server{
 		cfg:      cfg,
@@ -134,11 +145,31 @@ func Run(cfg Config) error {
 // routes returns the HTTP handler for all endpoints.
 func (s *server) routes() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/calendar.bin", s.handleBin)
-	mux.HandleFunc("/calendar.png", s.handlePNG)
-	mux.HandleFunc("/calendar.demo.png", s.handleDemoPNG)
+	mux.HandleFunc("/calendar.bin", s.requireToken(s.handleBin))
+	mux.HandleFunc("/calendar.png", s.requireToken(s.handlePNG))
+	mux.HandleFunc("/calendar.demo.png", s.requireToken(s.handleDemoPNG))
 	mux.HandleFunc("/healthz", s.handleHealth)
 	return mux
+}
+
+// requireToken rejects requests lacking cfg.AuthToken before any render work.
+// With no token configured it is a pass-through.
+func (s *server) requireToken(next http.HandlerFunc) http.HandlerFunc {
+	if s.cfg.AuthToken == "" {
+		return next
+	}
+	want := []byte(s.cfg.AuthToken)
+	return func(w http.ResponseWriter, r *http.Request) {
+		got := r.URL.Query().Get("token")
+		if bearer, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer "); ok {
+			got = bearer
+		}
+		if subtle.ConstantTimeCompare([]byte(got), want) != 1 {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next(w, r)
+	}
 }
 
 // validateConfig checks cfg and returns the loaded timezone.
@@ -288,12 +319,25 @@ func (s *server) handleBin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	packed := pack1Bit(img)
+	w.Header().Set("X-Sleep-Seconds", strconv.Itoa(sleepSeconds(time.Now().In(s.loc))))
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Length", strconv.Itoa(len(packed)))
 	if _, err := w.Write(packed); err != nil {
 		log.Printf("bin write: %v", err)
 	}
+}
+
+// sleepSeconds returns how long the ESP32 should sleep to wake at the next
+// :00/:30 mark in now's location, skipping a mark closer than wakeGuard.
+// Computing it here keeps the firmware free of NTP and timezone handling.
+func sleepSeconds(now time.Time) int {
+	pastHour := time.Duration(now.Minute())*time.Minute + time.Duration(now.Second())*time.Second
+	toMark := wakeMark - pastHour%wakeMark
+	if toMark < wakeGuard {
+		toMark += wakeMark
+	}
+	return int(toMark / time.Second)
 }
 
 func (s *server) handlePNG(w http.ResponseWriter, r *http.Request) {

@@ -42,6 +42,7 @@ archives:
       {{- if .Arm }}v{{ .Arm }}{{ end }}
     files:
       - README.md
+      - DEVELOPMENT.md
       - firmware/firebeetle_calendar/firebeetle_calendar.ino
       - firmware/firebeetle_calendar/secrets.h.example
       - deploy/calendar.service

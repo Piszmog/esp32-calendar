@@ -4,9 +4,11 @@ import (
 	"image"
 	"image/png"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -302,4 +304,88 @@ func TestHandler_Healthz_ReportsFailures(t *testing.T) {
 	code, body = getHealthz(t, s.Handler())
 	assert.Equal(t, http.StatusOK, code)
 	assert.Contains(t, body, "consecutive_failures=0\nlast_error=\n")
+}
+
+// doGet issues a GET against h and returns the status code and headers.
+func doGet(t *testing.T, h http.Handler, path string, header http.Header) (int, http.Header) {
+	t.Helper()
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, ts.URL+path, nil)
+	require.NoError(t, err)
+	maps.Copy(req.Header, header)
+	resp, err := ts.Client().Do(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	return resp.StatusCode, resp.Header
+}
+
+func TestHandler_AuthToken(t *testing.T) {
+	t.Parallel()
+
+	const token = "s3cret"
+	bearer := http.Header{"Authorization": {"Bearer " + token}}
+	wrong := http.Header{"Authorization": {"Bearer nope"}}
+
+	cases := []struct {
+		name     string
+		token    string
+		path     string
+		header   http.Header
+		wantCode int
+	}{
+		{"no token configured", "", testPathBin, nil, http.StatusOK},
+		{"missing token", token, testPathBin, nil, http.StatusUnauthorized},
+		{"wrong header token", token, testPathBin, wrong, http.StatusUnauthorized},
+		{"wrong query token", token, "/calendar.png?token=nope", nil, http.StatusUnauthorized},
+		{"header token", token, testPathBin, bearer, http.StatusOK},
+		{"query token", token, "/calendar.png?token=" + token, nil, http.StatusOK},
+		{"demo needs token", token, "/calendar.demo.png", nil, http.StatusUnauthorized},
+		{"healthz stays open", token, "/healthz", nil, http.StatusOK},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := calendar.Config{FetchInterval: calendar.TestFetchInterval, AuthToken: tc.token}
+			s := calendar.NewTestServer(cfg, time.UTC)
+			s.SetCached(nil, time.Now())
+			code, _ := doGet(t, s.Handler(), tc.path, tc.header)
+			assert.Equal(t, tc.wantCode, code)
+		})
+	}
+}
+
+func TestHandler_CalendarBin_SleepHeader(t *testing.T) {
+	t.Parallel()
+	code, header := doGet(t, testHandler(t), testPathBin, nil)
+	require.Equal(t, http.StatusOK, code)
+	n, err := strconv.Atoi(header.Get("X-Sleep-Seconds"))
+	require.NoError(t, err, "X-Sleep-Seconds must be an integer")
+	assert.GreaterOrEqual(t, n, 180)
+	assert.LessOrEqual(t, n, 30*60+180)
+}
+
+func TestSleepSeconds(t *testing.T) {
+	t.Parallel()
+	kathmandu, err := time.LoadLocation("Asia/Kathmandu") // UTC+5:45
+	require.NoError(t, err)
+
+	cases := []struct {
+		name string
+		now  time.Time
+		want int
+	}{
+		{"just past mark", time.Date(2026, 5, 11, 10, 0, 5, 0, time.UTC), 30*60 - 5},
+		{"mid interval", time.Date(2026, 5, 11, 10, 20, 0, 0, time.UTC), 10 * 60},
+		{"within guard pushes to next mark", time.Date(2026, 5, 11, 10, 28, 0, 0, time.UTC), 32 * 60},
+		{"at guard boundary", time.Date(2026, 5, 11, 10, 27, 0, 0, time.UTC), 3 * 60},
+		{"quarter-hour offset zone aligns locally", time.Date(2026, 5, 11, 10, 20, 0, 0, kathmandu), 10 * 60},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, calendar.SleepSeconds(tc.now))
+		})
+	}
 }

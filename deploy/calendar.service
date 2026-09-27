@@ -34,6 +34,19 @@ RestrictRealtime=true
 LockPersonality=true
 MemoryDenyWriteExecute=true
 CapabilityBoundingSet=
+ProtectClock=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectProc=invisible
+ProcSubset=pid
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+# Keep @resources: the Go runtime raises RLIMIT_NOFILE at startup. EPERM
+# (not SIGSYS) so any other filtered call fails instead of killing the process.
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+SystemCallErrorNumber=EPERM
+UMask=0077
 
 [Install]
 WantedBy=multi-user.target

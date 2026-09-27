@@ -205,6 +205,11 @@ Endpoints:
    ```
    A `.local` hostname also works if the Pi runs Avahi (Raspberry Pi OS does
    by default); the ESP32 resolves it via mDNS without extra setup.
+
+   Optional: uncomment `STATIC_IP`, `STATIC_GATEWAY`, `STATIC_SUBNET`, and
+   `STATIC_DNS` to give the ESP32 a fixed address. Skipping DHCP shortens
+   every wake by a second or two of radio time. Pick an address outside your
+   router's DHCP pool.
 2. Open `firmware/firebeetle_calendar/firebeetle_calendar.ino`. Edit
    `SERVER_PORT` in the `USER CONFIG` block if needed.
 3. **Tools → Board → DFRobot FireBeetle 2 ESP32-E** (or "ESP32 Dev Module").
@@ -237,6 +242,7 @@ On Apple Silicon you may need to approve it once under **System Settings → Pri
 | Which calendar | Set `ICAL_URL` in `~/calendar/calendar.env` to that calendar's **Secret address in iCal format** (Settings → Integrate calendar) |
 | How often the display refreshes | Aligns to the next :00/:30 mark in the server's `-tz` (≈30 min); the server sends the sleep time as `X-Sleep-Seconds`. To change the cadence, edit `wakeMark` in `server/internal/calendar/server.go`. |
 | Past-event cutoff | `now.Add(-30 * time.Minute)` in `server/internal/calendar/render.go` |
+| Declined meetings | Hidden automatically when the feed's calendar name is your email (Google's primary calendar); other calendars show everything |
 
 To preview layout changes without flashing: run the server locally with
 `./calendar-server -ical-url <your-url> -listen :8080` and open

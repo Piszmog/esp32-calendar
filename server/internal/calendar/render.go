@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/fogleman/gg"
 	"github.com/golang/freetype/truetype"
@@ -142,6 +143,21 @@ func face(size float64, bold bool) font.Face {
 	ff := truetype.NewFace(f, &truetype.Options{Size: size, DPI: fontDPI, Hinting: font.HintingFull})
 	fs.faces[k] = ff
 	return ff
+}
+
+// dropMissingGlyphs removes runes that either embedded font lacks (emoji,
+// most non-Latin scripts), which would otherwise draw as boxes, and collapses
+// the whitespace they leave behind. Font.Index only reads the cmap, so this
+// doesn't need renderMu.
+func dropMissingGlyphs(s string) string {
+	fs := loadFonts()
+	kept := strings.Map(func(r rune) rune {
+		if unicode.IsSpace(r) || (fs.regular.Index(r) != 0 && fs.bold.Index(r) != 0) {
+			return r
+		}
+		return -1
+	}, s)
+	return strings.Join(strings.Fields(kept), " ")
 }
 
 // displayData is what the renderer consumes — the result of running raw
@@ -309,7 +325,7 @@ func summarizeDay(events []event, fits func(string) bool) (string, string) {
 	parts := make([]string, 0, len(events))
 	for _, ev := range events {
 		if ev.AllDay {
-			parts = append(parts, ev.Title)
+			parts = append(parts, truncate(ev.Title, eventListTitleMax))
 			continue
 		}
 		// Short time: drop trailing :00 minutes and leading zero

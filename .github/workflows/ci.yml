@@ -62,6 +62,10 @@ jobs:
           const char* WIFI_SSID   = "ssid";
           const char* WIFI_PASS   = "pass";
           const char* SERVER_HOST = "example.local";
+          #define STATIC_IP      192,168,1,50
+          #define STATIC_GATEWAY 192,168,1,1
+          #define STATIC_SUBNET  255,255,255,0
+          #define STATIC_DNS     192,168,1,1
           EOF
       - name: Compile sketch
         uses: arduino/compile-sketches@v1

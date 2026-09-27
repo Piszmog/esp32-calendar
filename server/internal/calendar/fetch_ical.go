@@ -85,11 +85,12 @@ func fetchEventsIcal(ctx context.Context, feedURL string, loc *time.Location) ([
 // expanding recurring events (RRULE/RDATE) into individual instances.
 func eventsFromCal(cal *ics.Calendar, loc *time.Location, timeMin, timeMax time.Time) []event {
 	overrides := collectRecurrenceOverrides(cal, loc)
+	self := selfEmail(cal)
 	var out []event
 	for _, comp := range cal.Events() {
-		// Cancelled overrides still feed collectRecurrenceOverrides above, so
-		// the base-series slot they replace stays suppressed.
-		if isCancelled(comp) {
+		// Cancelled and declined overrides still feed collectRecurrenceOverrides
+		// above, so the base-series slot they replace stays suppressed.
+		if isCancelled(comp) || declinedBy(comp, self) {
 			continue
 		}
 		ev, ok := parseIcalEvent(comp, loc)
@@ -133,6 +134,37 @@ func anchorFloating(t time.Time, loc *time.Location) time.Time {
 func isCancelled(comp *ics.VEvent) bool {
 	p := comp.GetProperty(ics.ComponentPropertyStatus)
 	return p != nil && strings.EqualFold(strings.TrimSpace(p.Value), "CANCELLED")
+}
+
+// selfEmail returns the calendar owner's address from X-WR-CALNAME, which
+// Google sets to the owner's email on a primary calendar's feed. Returns ""
+// when the name isn't an email, which disables the declined filter.
+func selfEmail(cal *ics.Calendar) string {
+	for _, p := range cal.CalendarProperties {
+		if p.IANAToken == string(ics.PropertyXWRCalName) && strings.Contains(p.Value, "@") {
+			return strings.TrimSpace(p.Value)
+		}
+	}
+	return ""
+}
+
+// declinedBy reports whether self is an attendee of the VEVENT with
+// PARTSTAT=DECLINED.
+func declinedBy(comp *ics.VEvent, self string) bool {
+	if self == "" {
+		return false
+	}
+	for _, a := range comp.Attendees() {
+		addr := a.Value
+		if len(addr) >= len("mailto:") && strings.EqualFold(addr[:len("mailto:")], "mailto:") {
+			addr = addr[len("mailto:"):]
+		}
+		if strings.EqualFold(addr, self) &&
+			strings.EqualFold(string(a.ParticipationStatus()), string(ics.ParticipationStatusDeclined)) {
+			return true
+		}
+	}
+	return false
 }
 
 // collectRecurrenceOverrides returns a map of UID → original occurrence times for
@@ -298,7 +330,7 @@ func parseIcalEvent(comp *ics.VEvent, loc *time.Location) (event, bool) {
 	if s := comp.GetProperty(ics.ComponentPropertySummary); s != nil {
 		// Collapse whitespace: golang-ical unescapes \n into a real newline,
 		// which would render as a missing glyph.
-		title = strings.Join(strings.Fields(s.Value), " ")
+		title = dropMissingGlyphs(s.Value)
 	}
 
 	startProp := comp.GetProperty(ics.ComponentPropertyDtStart)

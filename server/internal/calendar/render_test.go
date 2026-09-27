@@ -189,14 +189,14 @@ func TestSummarizeDay(t *testing.T) {
 			"10 Abcdefghij · 11 Abcdefghij · 12 Abcdefghij", "+ 2 more events",
 		},
 		{
-			// Even the first part alone is too wide: keep it (the renderer
-			// ellipsizes it) and count the rest.
-			"first part overflows",
+			// All-day titles are shortened like timed ones, so a long one
+			// doesn't push the rest of the day into "+ N more".
+			"long all-day in multi",
 			[]calendar.Event{
 				{AllDay: true, Start: now, Title: strings.Repeat("x", 61)},
 				{Start: time.Date(2026, 5, 11, 10, 0, 0, 0, time.UTC), Title: "Review"},
 			},
-			strings.Repeat("x", 61), "+ 1 more event",
+			strings.Repeat("x", 9) + "… · 10 Review", "",
 		},
 	}
 	for _, tc := range cases {
@@ -207,6 +207,19 @@ func TestSummarizeDay(t *testing.T) {
 			assert.Equal(t, tc.wantMore, gotMore)
 		})
 	}
+}
+
+// TestSummarizeDay_FirstPartOverflows verifies that when even the first part
+// is too wide it is kept (the renderer ellipsizes it) and the rest counted.
+func TestSummarizeDay_FirstPartOverflows(t *testing.T) {
+	t.Parallel()
+	events := []calendar.Event{
+		{Start: time.Date(2026, 5, 11, 9, 0, 0, 0, time.UTC), Title: "Plan"},
+		{Start: time.Date(2026, 5, 11, 10, 0, 0, 0, time.UTC), Title: "Plan"},
+	}
+	summary, more := calendar.SummarizeDay(events, func(string) bool { return false })
+	assert.Equal(t, "9 Plan", summary)
+	assert.Equal(t, "+ 1 more event", more)
 }
 
 func TestBuildDisplayData_PastEventCutoff(t *testing.T) {

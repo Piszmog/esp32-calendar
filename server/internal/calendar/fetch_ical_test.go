@@ -773,3 +773,96 @@ END:VCALENDAR`
 	assert.Equal(t, 3, countTitle(events, "Mismatch"))
 	assert.Equal(t, 2, countTitle(events, "Match"))
 }
+
+// TestEventsFromCal_DropsMissingGlyphs verifies characters the embedded fonts
+// can't draw (emoji) are removed from titles, while ones they can are kept.
+func TestEventsFromCal_DropsMissingGlyphs(t *testing.T) {
+	t.Parallel()
+
+	body := `BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+UID:emoji@test
+SUMMARY:🎂 Mom's birthday ☀
+DTSTART:20260602T100000Z
+END:VEVENT
+BEGIN:VEVENT
+UID:accent@test
+SUMMARY:Café ✓
+DTSTART:20260602T110000Z
+END:VEVENT
+BEGIN:VEVENT
+UID:only-emoji@test
+SUMMARY:🎉
+DTSTART:20260602T120000Z
+END:VEVENT
+END:VCALENDAR`
+	events := eventsFromICS(t, body, anchor, anchor.AddDate(0, 0, 30))
+	assert.ElementsMatch(t, []string{"Mom's birthday ☀", "Café ✓", "(no title)"}, eventTitles(events))
+}
+
+// TestEventsFromCal_SkipsDeclined verifies events the calendar owner (from
+// X-WR-CALNAME) declined are dropped, including a declined override of one
+// recurring instance, whose base slot must stay suppressed.
+func TestEventsFromCal_SkipsDeclined(t *testing.T) {
+	t.Parallel()
+
+	body := `BEGIN:VCALENDAR
+VERSION:2.0
+X-WR-CALNAME:me@example.com
+BEGIN:VEVENT
+UID:declined@test
+SUMMARY:Declined
+DTSTART:20260602T100000Z
+ATTENDEE;CN=me@example.com;PARTSTAT=DECLINED:MAILTO:Me@Example.com
+END:VEVENT
+BEGIN:VEVENT
+UID:other-declined@test
+SUMMARY:Someone else declined
+DTSTART:20260602T110000Z
+ATTENDEE;PARTSTAT=ACCEPTED:mailto:me@example.com
+ATTENDEE;PARTSTAT=DECLINED:mailto:bob@example.com
+END:VEVENT
+BEGIN:VEVENT
+UID:standup-decline@test
+SUMMARY:Weekly standup
+DTSTART:20260601T100000Z
+DTEND:20260601T103000Z
+RRULE:FREQ=WEEKLY;COUNT=3
+ATTENDEE;PARTSTAT=ACCEPTED:mailto:me@example.com
+END:VEVENT
+BEGIN:VEVENT
+UID:standup-decline@test
+SUMMARY:Weekly standup
+DTSTART:20260608T100000Z
+DTEND:20260608T103000Z
+RECURRENCE-ID:20260608T100000Z
+ATTENDEE;PARTSTAT=DECLINED:mailto:me@example.com
+END:VEVENT
+END:VCALENDAR`
+	events := eventsFromICS(t, body, anchor, anchor.AddDate(0, 0, 21))
+
+	titles := eventTitles(events)
+	assert.NotContains(t, titles, "Declined")
+	assert.Contains(t, titles, "Someone else declined")
+	assert.Equal(t, 2, countTitle(events, "Weekly standup"), "declined June 8 instance must not appear")
+}
+
+// TestEventsFromCal_DeclinedNeedsOwnerEmail verifies the declined filter is
+// off when X-WR-CALNAME isn't an email, since the owner is then unknown.
+func TestEventsFromCal_DeclinedNeedsOwnerEmail(t *testing.T) {
+	t.Parallel()
+
+	body := `BEGIN:VCALENDAR
+VERSION:2.0
+X-WR-CALNAME:Family
+BEGIN:VEVENT
+UID:declined@test
+SUMMARY:Declined
+DTSTART:20260602T100000Z
+ATTENDEE;PARTSTAT=DECLINED:mailto:Family
+END:VEVENT
+END:VCALENDAR`
+	events := eventsFromICS(t, body, anchor, anchor.AddDate(0, 0, 30))
+	assert.Equal(t, []string{"Declined"}, eventTitles(events))
+}

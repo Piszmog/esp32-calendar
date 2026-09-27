@@ -7,10 +7,14 @@ on:
     branches:
       - main
   workflow_dispatch:
+  # Release gates tagging on this whole workflow.
+  workflow_call:
 permissions:
   contents: read
 concurrency:
-  group: ci-${{ github.ref }}
+  # github.workflow is the caller's name under workflow_call, so a release
+  # run doesn't cancel (or get cancelled by) a push run on the same ref.
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 jobs:
   lint:

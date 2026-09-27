@@ -495,6 +495,43 @@ func TestExpandRecurring_AllDayAcrossDST(t *testing.T) {
 	}
 }
 
+// TestExpandRecurring_AllDayWidenedTailDropped covers the one way an
+// occurrence from the widened query ends before timeMin: the base event's
+// duration is 25h (a fall-back day) but a later occurrence lasts one 24h day.
+func TestExpandRecurring_AllDayWidenedTailDropped(t *testing.T) {
+	t.Parallel()
+	loc, err := time.LoadLocation("America/New_York")
+	require.NoError(t, err)
+	// 2026-11-01 is the fall-back day, so the base event is 25h long.
+	body := "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nUID:tail@test\nSUMMARY:Daily\n" +
+		"DTSTART;VALUE=DATE:20261101\nDTEND;VALUE=DATE:20261102\n" +
+		"RRULE:FREQ=DAILY\nEND:VEVENT\nEND:VCALENDAR"
+	// The widened query reaches back to Nov 8 23:30 and picks up the Nov 9
+	// occurrence, which ended at midnight, before timeMin.
+	timeMin := time.Date(2026, 11, 10, 0, 30, 0, 0, loc)
+	events, err := calendar.EventsFromICS(body, loc, timeMin, timeMin.AddDate(0, 0, 1))
+	require.NoError(t, err)
+	require.Len(t, events, 2)
+	assert.Equal(t, time.Date(2026, 11, 10, 0, 0, 0, 0, loc), events[0].Start, "Nov 9 ended before timeMin and must be dropped")
+	assert.Equal(t, time.Date(2026, 11, 11, 0, 0, 0, 0, loc), events[1].Start)
+}
+
+// TestExpandRecurring_NoEndTime verifies that a recurring timed event with
+// neither DTEND nor DURATION expands to zero-length instances.
+func TestExpandRecurring_NoEndTime(t *testing.T) {
+	t.Parallel()
+	body := "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nUID:noend@test\nSUMMARY:Reminder\n" +
+		"DTSTART:20260601T090000Z\nRRULE:FREQ=DAILY;COUNT=5\nEND:VEVENT\nEND:VCALENDAR"
+	// The window starts at the second occurrence exactly: a zero-length
+	// instance at timeMin is still in the window.
+	events := eventsFromICS(t, body, anchor.Add(33*time.Hour), anchor.AddDate(0, 0, 10))
+	require.Len(t, events, 4)
+	for _, ev := range events {
+		assert.True(t, ev.End.IsZero(), "occurrence at %v should have no end", ev.Start)
+	}
+	assert.Equal(t, anchor.Add(33*time.Hour), events[0].Start)
+}
+
 func TestFetchEventsIcal_SendsUserAgent(t *testing.T) {
 	t.Parallel()
 
@@ -521,6 +558,18 @@ func TestFetchEventsIcal_TooLarge(t *testing.T) {
 	_, err := calendar.FetchEventsIcal(t.Context(), srv.URL, time.UTC)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "exceeds size limit")
+}
+
+// TestFetchEventsIcal_NotICal covers a 200 whose body isn't iCal, e.g. an
+// HTML login page served for a revoked secret URL.
+func TestFetchEventsIcal_NotICal(t *testing.T) {
+	t.Parallel()
+	srv := icalServer(t, "<!DOCTYPE html><html><body>Sign in</body></html>")
+	t.Cleanup(srv.Close)
+
+	_, err := calendar.FetchEventsIcal(t.Context(), srv.URL, time.UTC)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "parse ical")
 }
 
 func TestFetchEventsIcal_ErrorOmitsURL(t *testing.T) {

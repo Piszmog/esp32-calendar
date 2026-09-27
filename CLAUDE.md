@@ -30,6 +30,12 @@ golangci-lint run                               # strict default: all config
 
 # Test
 go test ./...                                   # must pass before any server/ change is considered done
+go test ./internal/calendar -run Golden -update # regenerate testdata/golden.png after an intended layout change
+go test -run '^$' -fuzz=FuzzEventsFromICS -fuzztime=60s ./internal/calendar  # fuzz (seeds run in plain go test)
+
+# Firmware host tests (from repo root)
+c++ -std=c++17 -Wall -Wextra -Werror -I firmware/firebeetle_calendar \
+  firmware/test/logic_test.cpp -o logic_test && ./logic_test
 
 # Preview (run locally, visit http://localhost:8080/calendar.png)
 ./calendar-server -ical-url <your-secret-ical-url> -listen :8080
@@ -112,7 +118,7 @@ a test file to `package calendar` — keep the blackbox boundary intact.
 - **Optional token auth.** When `AuthToken` (`AUTH_TOKEN` env / `-auth-token`) is set, `requireToken` rejects `/calendar.*` requests lacking `Authorization: Bearer <token>` or `?token=<token>` with 401 before rendering. `/healthz` stays open. With no token (the default) every endpoint is open to the LAN. The firmware sends `AUTH_TOKEN` from `secrets.h` (defaults to empty for older `secrets.h` files).
 - **Server owns the wake schedule.** `handleBin` sets `X-Sleep-Seconds` (`sleepSeconds`: next :00/:30 in the server timezone, skipping marks closer than `wakeGuard`). The firmware has no NTP; it falls back to 30 min if the header is missing or out of range.
 - **Font faces are cached and not goroutine-safe.** `face()` returns shared faces from `loadFonts()`; `renderImage` holds `fontSet.renderMu` for the whole render. Don't call `face()` outside a render.
-- **Firmware contract is tested.** `protocol_test.go` reads the `.ino` and checks `IMG_W`/`IMG_H`, the query params, `drawInvertedBitmap(..., GxEPD_BLACK)`, `X-Sleep-Seconds` and `Authorization`. Update both sides together.
+- **Firmware contract is tested.** `protocol_test.go` reads the `.ino` and `calendar_logic.h` and checks `IMG_W`/`IMG_H`, the query params, `drawInvertedBitmap(..., GxEPD_BLACK)`, `X-Sleep-Seconds` and `Authorization`; it also checks every `sleepSeconds` value lies within the firmware's `MIN_SLEEP_S`..`MAX_SLEEP_S`. Update both sides together.
 
 ## Linter notes (`server/.golangci.yml`)
 
@@ -126,4 +132,4 @@ a test file to `package calendar` — keep the blackbox boundary intact.
 
 ## Firmware (`firmware/firebeetle_calendar/firebeetle_calendar.ino`)
 
-Arduino sketch; built via Arduino IDE (not `go` or `make`). Before flashing, copy `firmware/firebeetle_calendar/secrets.h.example` → `firmware/firebeetle_calendar/secrets.h` and fill in `WIFI_SSID`, `WIFI_PASS`, `SERVER_HOST`. `SERVER_PORT` is set directly in the `USER CONFIG` block of the `.ino`; `EPD_PWR` (GPIO wired to the HAT's PWR pin, `-1` = tied to 3V3) is next to the pin map. The image buffer is a static `imgBuf`. The firmware omits `bat` when the reading is under `NO_BATT_SENSE_MV` (no sense divider), and counts the sleep from when the response arrived, so draw time comes out of it. Optional `STATIC_IP`/`STATIC_GATEWAY`/`STATIC_SUBNET`/`STATIC_DNS` macros in `secrets.h` (comma-separated octets) make `connectWiFi()` skip DHCP; CI's dummy `secrets.h` defines them so that branch compiles. `secrets.h` is gitignored; `.claude/settings.json` also blocks Claude from reading it. Battery voltage is read from GPIO34 through a 1:2 internal divider; calibration lives in `batteryPercent()`.
+Arduino sketch; built via Arduino IDE (not `go` or `make`). Before flashing, copy `firmware/firebeetle_calendar/secrets.h.example` → `firmware/firebeetle_calendar/secrets.h` and fill in `WIFI_SSID`, `WIFI_PASS`, `SERVER_HOST`. `SERVER_PORT` is set directly in the `USER CONFIG` block of the `.ino`; `EPD_PWR` (GPIO wired to the HAT's PWR pin, `-1` = tied to 3V3) is next to the pin map. The image buffer is a static `imgBuf`. The firmware omits `bat` when the reading is under `NO_BATT_SENSE_MV` (no sense divider), and counts the sleep from when the response arrived, so draw time comes out of it. Optional `STATIC_IP`/`STATIC_GATEWAY`/`STATIC_SUBNET`/`STATIC_DNS` macros in `secrets.h` (comma-separated octets) make `connectWiFi()` skip DHCP; CI's dummy `secrets.h` defines them so that branch compiles. Pure wake-cycle logic (battery curve and low-battery hysteresis/draw-once step, backoff and error-screen streak, response status/size check, sleep-header clamp, millis-wrap sleep math, request path) lives in `calendar_logic.h`, which must stay free of Arduino headers: `firmware/test/logic_test.cpp` compiles it with the host `c++` in CI's `Firmware Unit Tests` job. `secrets.h` is gitignored; `.claude/settings.json` also blocks Claude from reading it. Battery voltage is read from GPIO34 through a 1:2 internal divider; calibration lives in `batteryPercent()`.

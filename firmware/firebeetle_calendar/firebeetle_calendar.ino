@@ -33,6 +33,7 @@
 #include "esp_sleep.h"
 #include "esp_task_wdt.h"
 #include "driver/gpio.h"
+#include "calendar_logic.h"
 
 // ============ USER CONFIG ============
 #include "secrets.h"
@@ -74,28 +75,6 @@ constexpr uint32_t WDT_TIMEOUT_MS = 120000;
 // Single deadline for the HTTP fetch, from request start to last byte.
 constexpr uint32_t FETCH_DEADLINE_MS = 20000;
 
-// Below LOW_BATT_MV the board shows a "charge me" screen once, then only
-// re-checks the battery every LOW_BATT_RECHECK_S instead of browning out on
-// every wake. It resumes once the battery reaches LOW_BATT_RECOVER_MV (the
-// gap stops it flapping around the cutoff). Readings under NO_BATT_SENSE_MV
-// mean the battery-sense divider is absent (some clones), so the cutoff is
-// skipped rather than bricking the board.
-constexpr uint32_t LOW_BATT_MV         = 3400;
-constexpr uint32_t LOW_BATT_RECOVER_MV = 3600;
-constexpr uint32_t NO_BATT_SENSE_MV    = 2500;
-constexpr uint64_t LOW_BATT_RECHECK_S  = 2ULL * 60ULL * 60ULL;
-
-// Sleep used when the server's X-Sleep-Seconds header is missing or out of
-// range (MIN_SLEEP_S..MAX_SLEEP_S).
-constexpr uint64_t DEFAULT_SLEEP_S = 30ULL * 60ULL;
-constexpr long     MIN_SLEEP_S     = 60;
-constexpr long     MAX_SLEEP_S     = 2L * 60L * 60L;
-
-// Failed wakes back off 5 -> 15 -> 30 -> 60 min. The error screen replaces the
-// calendar only after ERROR_SCREEN_AFTER consecutive failures, and is drawn
-// once, not on every retry.
-constexpr uint8_t ERROR_SCREEN_AFTER = 3;
-
 // Survive deep sleep (cleared on power-on or reset).
 RTC_DATA_ATTR uint8_t rtcFailCount   = 0;
 RTC_DATA_ATTR bool    rtcErrorShown  = false;
@@ -128,17 +107,6 @@ void goToSleep(uint64_t seconds) {
     Serial.flush();
     esp_sleep_enable_timer_wakeup(seconds * 1000000ULL);
     esp_deep_sleep_start();
-}
-
-// Returns seconds to sleep after the given number of consecutive failures.
-uint64_t backoffSeconds(uint8_t failures) {
-    switch (failures) {
-        case 0:
-        case 1:  return 5ULL * 60ULL;
-        case 2:  return 15ULL * 60ULL;
-        case 3:  return 30ULL * 60ULL;
-        default: return 60ULL * 60ULL;
-    }
 }
 
 bool waitForWiFi(uint32_t timeoutMs) {
@@ -206,32 +174,16 @@ uint32_t readBatteryMv() {
     return pin_mv * 2;
 }
 
-// Map battery voltage (mV) to percentage (0-100) using a simple LiPo curve.
-int batteryPercent(uint32_t mv) {
-    if (mv >= 4100) return 100;
-    if (mv >= 3950) return 75 + (mv - 3950) * 25 / 150;
-    if (mv >= 3800) return 50 + (mv - 3800) * 25 / 150;
-    if (mv >= 3700) return 25 + (mv - 3700) * 25 / 100;
-    if (mv >= 3500) return     (mv - 3500) * 25 / 200;
-    return 0;
-}
-
 // On success, *wakeAtMs is the millis() at which to wake: the server's
 // X-Sleep-Seconds (or DEFAULT_SLEEP_S when that header is absent or out of
 // range) counted from when the response arrived, so the time spent drawing
 // comes out of the sleep. batPct < 0 means no battery reading; bat is omitted.
 bool fetchImage(uint8_t* buf, int batPct, int rssi, uint32_t* wakeAtMs,
                 char* reason, size_t reasonLen) {
+    char path[48];
+    formatCalendarPath(path, sizeof(path), batPct, rssi);
     char url[160];
-    if (batPct >= 0) {
-        snprintf(url, sizeof(url),
-                 "http://%s:%u/calendar.bin?bat=%d&rssi=%d",
-                 SERVER_HOST, SERVER_PORT, batPct, rssi);
-    } else {
-        snprintf(url, sizeof(url),
-                 "http://%s:%u/calendar.bin?rssi=%d",
-                 SERVER_HOST, SERVER_PORT, rssi);
-    }
+    snprintf(url, sizeof(url), "http://%s:%u%s", SERVER_HOST, SERVER_PORT, path);
 
     Serial.printf("GET %s\n", url);
 
@@ -250,29 +202,19 @@ bool fetchImage(uint8_t* buf, int batPct, int rssi, uint32_t* wakeAtMs,
     http.collectHeaders(headerKeys, 1);
 
     int code = http.GET();
-    if (code != HTTP_CODE_OK) {
-        if (code > 0) {
-            snprintf(reason, reasonLen, "HTTP %d", code);
-        } else {
-            snprintf(reason, reasonLen, "%s", http.errorToString(code).c_str());
-        }
+    if (code <= 0) {
+        snprintf(reason, reasonLen, "%s", http.errorToString(code).c_str());
         Serial.println(reason);
         http.end();
         return false;
     }
-    long serverSleep = http.header("X-Sleep-Seconds").toInt();
-    uint64_t sleepSecs = (serverSleep >= MIN_SLEEP_S && serverSleep <= MAX_SLEEP_S)
-                             ? (uint64_t)serverSleep
-                             : DEFAULT_SLEEP_S;
-    *wakeAtMs = millis() + (uint32_t)(sleepSecs * 1000ULL);
-
-    int len = http.getSize();
-    if (len != (int)BUF_BYTES) {
-        snprintf(reason, reasonLen, "size %d, expected %u", len, BUF_BYTES);
+    if (!checkResponse(code, http.getSize(), BUF_BYTES, reason, reasonLen)) {
         Serial.println(reason);
         http.end();
         return false;
     }
+    uint64_t sleepSecs = clampSleepSeconds(http.header("X-Sleep-Seconds").toInt());
+    *wakeAtMs = wakeAtMillis(millis(), sleepSecs);
 
     WiFiClient* s = http.getStreamPtr();
     if (!s) {
@@ -343,16 +285,16 @@ void drawError(const char* title, const char* detail, const char* statusLine) {
 // reaches ERROR_SCREEN_AFTER (leaving the last calendar up until then), and
 // sleeps with backoff. Does not return.
 void failAndSleep(const char* title, const char* detail, const char* statusLine) {
-    if (rtcFailCount < UINT8_MAX) rtcFailCount++;
+    FailStep step = nextFailure(rtcFailCount, rtcErrorShown);
+    rtcFailCount = step.failCount;
     Serial.printf("failure %u: %s: %s\n", rtcFailCount, title, detail);
     wifiOff();   // before drawing: the radio isn't needed during the refresh
-    if (rtcFailCount >= ERROR_SCREEN_AFTER && !rtcErrorShown) {
+    if (step.drawError) {
         drawError(title, detail, statusLine);
         rtcErrorShown = true;
     }
-    uint64_t sleepSecs = backoffSeconds(rtcFailCount);
-    Serial.printf("sleeping %llus\n", sleepSecs);
-    goToSleep(sleepSecs);
+    Serial.printf("sleeping %llus\n", step.sleepSecs);
+    goToSleep(step.sleepSecs);
 }
 
 void setup() {
@@ -372,22 +314,22 @@ void setup() {
 
     // Read battery BEFORE WiFi powers up (cleaner reading).
     uint32_t mv = readBatteryMv();
-    bool battSensed = mv > NO_BATT_SENSE_MV;
+    bool battSensed = batterySensed(mv);
     int batPct = battSensed ? batteryPercent(mv) : -1;
     Serial.printf("battery: %u mV (%d%%)\n", mv, batPct);
 
-    uint32_t lowCutoff = rtcLowBattShown ? LOW_BATT_RECOVER_MV : LOW_BATT_MV;
-    if (battSensed && mv < lowCutoff) {
+    BatteryStep batt = batteryStep(mv, rtcLowBattShown);
+    if (batt.stop) {
         Serial.println("battery low — rechecking later");
-        if (!rtcLowBattShown) {
+        if (batt.drawLow) {
             char detail[48];
             snprintf(detail, sizeof(detail), "%u mV. Charge to resume.", mv);
             drawError("Battery low", detail, "");
-            rtcLowBattShown = true;
         }
+        rtcLowBattShown = batt.lowShown;
         goToSleep(LOW_BATT_RECHECK_S);
     }
-    rtcLowBattShown = false;
+    rtcLowBattShown = batt.lowShown;
 
     char batStr[8];
     if (battSensed) {
@@ -414,8 +356,7 @@ void setup() {
 
     rtcFailCount = 0;
     rtcErrorShown = false;
-    int32_t remainingMs = (int32_t)(wakeAtMs - millis());
-    uint64_t sleepSecs = remainingMs > 1000 ? (uint64_t)remainingMs / 1000ULL : 1ULL;
+    uint64_t sleepSecs = remainingSleepSeconds(wakeAtMs, millis());
     Serial.printf("sleeping %llus\n", sleepSecs);
     goToSleep(sleepSecs);
 }

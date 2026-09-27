@@ -1,6 +1,7 @@
 package calendar_test
 
 import (
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -22,6 +23,13 @@ func TestRun_Errors(t *testing.T) {
 		http.Error(w, "server error", http.StatusInternalServerError)
 	}))
 	t.Cleanup(badICalSrv.Close)
+
+	goodICalSrv := icalServer(t, icsFixture)
+	t.Cleanup(goodICalSrv.Close)
+	// Held open so Run's ListenAndServe fails after the initial fetch succeeds.
+	busy, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = busy.Close() })
 
 	cases := []struct {
 		name       string
@@ -86,6 +94,16 @@ func TestRun_Errors(t *testing.T) {
 				ICalURL:       badICalSrv.URL,
 			},
 			"fetch ical",
+		},
+		{
+			"listen address in use",
+			calendar.Config{
+				Timezone:      testTimezoneUTC,
+				ListenAddr:    busy.Addr().String(),
+				FetchInterval: time.Minute,
+				ICalURL:       goodICalSrv.URL,
+			},
+			"listen:",
 		},
 	}
 	for _, tc := range cases {

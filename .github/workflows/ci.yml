@@ -56,6 +56,16 @@ jobs:
           go-version-file: server/go.mod
           cache-dependency-path: server/go.sum
           work-dir: server
+  firmware-unit:
+    name: Firmware Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build and run host tests
+        run: |
+          c++ -std=c++17 -Wall -Wextra -Werror -I firmware/firebeetle_calendar \
+            firmware/test/logic_test.cpp -o logic_test
+          ./logic_test
   firmware:
     name: Firmware Build
     runs-on: ubuntu-latest

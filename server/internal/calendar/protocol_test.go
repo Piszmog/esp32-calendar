@@ -4,7 +4,9 @@ import (
 	"os"
 	"regexp"
 	"strconv"
+	"strings"
 	"testing"
+	"time"
 
 	"calendar-display/internal/calendar"
 
@@ -12,15 +14,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const firmwarePath = "../../../firmware/firebeetle_calendar/firebeetle_calendar.ino"
+const firmwareDir = "../../../firmware/firebeetle_calendar/"
 
 // TestFirmwareProtocolContract checks that the sketch still agrees with the
 // server on the parts of the protocol that have no runtime handshake.
 func TestFirmwareProtocolContract(t *testing.T) {
 	t.Parallel()
-	src, err := os.ReadFile(firmwarePath)
+	sketch, err := os.ReadFile(firmwareDir + "firebeetle_calendar.ino")
 	require.NoError(t, err)
-	ino := string(src)
+	logic, err := os.ReadFile(firmwareDir + "calendar_logic.h")
+	require.NoError(t, err)
+	ino := string(sketch) + string(logic)
 
 	dim := func(name string) int {
 		m := regexp.MustCompile(`constexpr\s+uint32_t\s+` + name + `\s*=\s*(\d+)\s*;`).FindStringSubmatch(ino)
@@ -41,5 +45,37 @@ func TestFirmwareProtocolContract(t *testing.T) {
 		{`"Authorization"`, "sketch must send the token requireToken checks"},
 	} {
 		assert.True(t, regexp.MustCompile(c.pattern).MatchString(ino), c.why)
+	}
+}
+
+// TestSleepHeaderWithinFirmwareRange checks that every X-Sleep-Seconds value
+// the server can send lies inside the range clampSleepSeconds accepts;
+// anything outside is silently replaced by the firmware's 30-minute default.
+func TestSleepHeaderWithinFirmwareRange(t *testing.T) {
+	t.Parallel()
+	logic, err := os.ReadFile(firmwareDir + "calendar_logic.h")
+	require.NoError(t, err)
+
+	// Evaluates constants written as a product of integer literals, e.g. 2L * 60L * 60L.
+	constant := func(name string) int {
+		m := regexp.MustCompile(`constexpr\s+\w+\s+` + name + `\s*=\s*([^;]+);`).FindSubmatch(logic)
+		require.NotNil(t, m, "%s not found in calendar_logic.h", name)
+		n := 1
+		for factor := range strings.SplitSeq(string(m[1]), "*") {
+			v, err := strconv.Atoi(strings.TrimRight(strings.TrimSpace(factor), "UL"))
+			require.NoError(t, err, "%s: unsupported expression %q", name, m[1])
+			n *= v
+		}
+		return n
+	}
+	minSleep, maxSleep := constant("MIN_SLEEP_S"), constant("MAX_SLEEP_S")
+
+	// sleepSeconds depends only on minute and second, so one hour covers every input.
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	for s := range 3600 {
+		got := calendar.SleepSeconds(start.Add(time.Duration(s) * time.Second))
+		if got < minSleep || got > maxSleep {
+			t.Fatalf("sleepSeconds at +%ds = %d, outside firmware range [%d, %d]", s, got, minSleep, maxSleep)
+		}
 	}
 }

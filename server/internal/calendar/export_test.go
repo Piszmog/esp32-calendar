@@ -74,12 +74,13 @@ func FetchEventsIcal(ctx context.Context, url string, loc *time.Location) ([]Eve
 // fetch. Suitable for use with httptest.NewServer in handler tests.
 func NewTestHandler(loc *time.Location, events []Event, fetchedAt time.Time) http.Handler {
 	s := &server{
-		cfg:      Config{FetchInterval: TestFetchInterval},
-		loc:      loc,
-		mu:       sync.RWMutex{},
-		cached:   events,
-		cachedAt: fetchedAt,
-		renderFn: nil,
+		cfg:       Config{FetchInterval: TestFetchInterval},
+		loc:       loc,
+		mu:        sync.RWMutex{},
+		cached:    events,
+		cachedAt:  fetchedAt,
+		renderFn:  nil,
+		deviceBat: -1,
 	}
 	return s.Handler()
 }
@@ -93,12 +94,13 @@ func NewTestHandlerWithRenderer(
 	renderFn func(DisplayData) image.Image,
 ) http.Handler {
 	s := &server{
-		cfg:      Config{FetchInterval: TestFetchInterval},
-		loc:      loc,
-		mu:       sync.RWMutex{},
-		cached:   events,
-		cachedAt: fetchedAt,
-		renderFn: renderFn,
+		cfg:       Config{FetchInterval: TestFetchInterval},
+		loc:       loc,
+		mu:        sync.RWMutex{},
+		cached:    events,
+		cachedAt:  fetchedAt,
+		renderFn:  renderFn,
+		deviceBat: -1,
 	}
 	return s.Handler()
 }
@@ -110,12 +112,13 @@ type Server = server
 // calling Refresh or SetCached in tests.
 func NewTestServer(cfg Config, loc *time.Location) *Server {
 	return &server{
-		cfg:      cfg,
-		loc:      loc,
-		mu:       sync.RWMutex{},
-		cached:   nil,
-		cachedAt: time.Time{},
-		renderFn: nil,
+		cfg:       cfg,
+		loc:       loc,
+		mu:        sync.RWMutex{},
+		cached:    nil,
+		cachedAt:  time.Time{},
+		renderFn:  nil,
+		deviceBat: -1,
 	}
 }
 
@@ -137,6 +140,14 @@ func (s *Server) Cached() []Event {
 	return events
 }
 
+// RefreshLoop runs the internal refresh loop until ctx is cancelled.
+func (s *Server) RefreshLoop(ctx context.Context) { s.refreshLoop(ctx) }
+
+// GracefulShutdown wraps gracefulShutdown for blackbox tests.
+func GracefulShutdown(srv *http.Server, cancel context.CancelFunc, loopDone *sync.WaitGroup, serveErr <-chan error) error {
+	return gracefulShutdown(srv, cancel, loopDone, serveErr)
+}
+
 // Handler returns the same routes Run installs, backed by s.
 func (s *Server) Handler() http.Handler { return s.routes() }
 
@@ -149,6 +160,11 @@ func EventsFromICS(body string, loc *time.Location, timeMin, timeMax time.Time) 
 		return nil, fmt.Errorf("parse ical: %w", err)
 	}
 	return eventsFromCal(cal, loc, timeMin, timeMax), nil
+}
+
+// RequestLogLine wraps requestLogLine for blackbox tests.
+func RequestLogLine(r *http.Request, status int, d time.Duration) string {
+	return requestLogLine(r, status, d)
 }
 
 // SleepSeconds wraps sleepSeconds for blackbox tests.

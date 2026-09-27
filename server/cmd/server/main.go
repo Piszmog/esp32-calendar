@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"time"
+	_ "time/tzdata" // embedded zoneinfo: -tz and iCal TZIDs resolve without /usr/share/zoneinfo
 
 	"calendar-display/internal/calendar"
 )

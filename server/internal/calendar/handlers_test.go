@@ -46,7 +46,7 @@ func TestHandler_Healthz(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	body, _ := io.ReadAll(resp.Body)
-	ok, _ := regexp.Match(`^ok\nlast_fetch_age=.+\nevents=\d+\nconsecutive_failures=0\nlast_error=\n$`, body)
+	ok, _ := regexp.Match(`^ok\nlast_fetch_age=.+\nevents=\d+\nconsecutive_failures=0\nlast_error=\ndevice_last_seen_age=never\ndevice_battery=unknown\n$`, body)
 	assert.True(t, ok, "healthz body should match expected format, got: %s", string(body))
 }
 
@@ -388,4 +388,53 @@ func TestSleepSeconds(t *testing.T) {
 			assert.Equal(t, tc.want, calendar.SleepSeconds(tc.now))
 		})
 	}
+}
+
+func TestHandler_Healthz_DeviceCheckIn(t *testing.T) {
+	t.Parallel()
+	h := testHandler(t)
+
+	code, _ := doGet(t, h, testPathBin+"?bat=42&rssi=-60", nil)
+	require.Equal(t, http.StatusOK, code)
+
+	_, body := getHealthz(t, h)
+	assert.Regexp(t, `\ndevice_last_seen_age=\d+s\n`, body)
+	assert.Contains(t, body, "\ndevice_battery=42%\n")
+}
+
+func TestHandler_MethodGuard(t *testing.T) {
+	t.Parallel()
+	ts := httptest.NewServer(testHandler(t))
+	defer ts.Close()
+
+	cases := []struct {
+		method string
+		path   string
+		want   int
+	}{
+		{http.MethodPost, testPathBin, http.StatusMethodNotAllowed},
+		{http.MethodPut, "/calendar.png", http.StatusMethodNotAllowed},
+		{http.MethodPost, "/healthz", http.StatusMethodNotAllowed},
+		{http.MethodHead, testPathBin, http.StatusOK},
+		{http.MethodHead, "/calendar.png", http.StatusOK},
+	}
+	for _, tc := range cases {
+		req, err := http.NewRequestWithContext(t.Context(), tc.method, ts.URL+tc.path, nil)
+		require.NoError(t, err)
+		resp, err := ts.Client().Do(req)
+		require.NoError(t, err)
+		_ = resp.Body.Close()
+		assert.Equal(t, tc.want, resp.StatusCode, "%s %s", tc.method, tc.path)
+	}
+}
+
+func TestRequestLogLine(t *testing.T) {
+	t.Parallel()
+	r := httptest.NewRequestWithContext(t.Context(), http.MethodGet, testPathBin+"?bat=76&rssi=-55&token=s3cret", nil)
+	line := calendar.RequestLogLine(r, http.StatusOK, 1234*time.Microsecond)
+	assert.Equal(t, `GET "/calendar.bin" 200 1ms bat="76" rssi="-55"`, line)
+	assert.NotContains(t, line, "s3cret", "token must never be logged")
+
+	r = httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/healthz", nil)
+	assert.Equal(t, `GET "/healthz" 401 0s`, calendar.RequestLogLine(r, http.StatusUnauthorized, 0))
 }

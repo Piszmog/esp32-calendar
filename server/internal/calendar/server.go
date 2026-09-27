@@ -75,6 +75,10 @@ type server struct {
 	// lastErr and consecutiveFailures describe fetches since the last success.
 	lastErr             error
 	consecutiveFailures int
+	// deviceSeenAt and deviceBat record the ESP32's last /calendar.bin
+	// request, so /healthz shows when the display last checked in.
+	deviceSeenAt time.Time
+	deviceBat    int
 	// renderFn overrides renderImage when non-nil; used only in tests.
 	renderFn func(displayData) image.Image
 }
@@ -93,12 +97,13 @@ func Run(cfg Config) error {
 	loadFonts()
 
 	s := &server{
-		cfg:      cfg,
-		loc:      loc,
-		mu:       sync.RWMutex{},
-		cached:   nil,
-		cachedAt: time.Time{},
-		renderFn: nil,
+		cfg:       cfg,
+		loc:       loc,
+		mu:        sync.RWMutex{},
+		cached:    nil,
+		cachedAt:  time.Time{},
+		renderFn:  nil,
+		deviceBat: -1,
 	}
 
 	if err := s.refresh(context.Background()); err != nil {
@@ -142,14 +147,53 @@ func Run(cfg Config) error {
 	return gracefulShutdown(srv, cancel, &loopDone, serveErr)
 }
 
-// routes returns the HTTP handler for all endpoints.
+// routes returns the HTTP handler for all endpoints. GET patterns also match
+// HEAD; other methods get 405 before any render work.
 func (s *server) routes() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/calendar.bin", s.requireToken(s.handleBin))
-	mux.HandleFunc("/calendar.png", s.requireToken(s.handlePNG))
-	mux.HandleFunc("/calendar.demo.png", s.requireToken(s.handleDemoPNG))
-	mux.HandleFunc("/healthz", s.handleHealth)
-	return mux
+	mux.HandleFunc("GET /calendar.bin", s.requireToken(s.handleBin))
+	mux.HandleFunc("GET /calendar.png", s.requireToken(s.handlePNG))
+	mux.HandleFunc("GET /calendar.demo.png", s.requireToken(s.handleDemoPNG))
+	mux.HandleFunc("GET /healthz", s.handleHealth)
+	return logRequests(mux)
+}
+
+// statusRecorder captures the status code a handler writes.
+type statusRecorder struct {
+	http.ResponseWriter
+
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	r.status = code
+	r.ResponseWriter.WriteHeader(code)
+}
+
+// logRequests logs one line per request so journalctl shows whether the
+// ESP32 checked in, what it reported, and what it got back.
+func logRequests(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(rec, r)
+		log.Print(requestLogLine(r, rec.status, time.Since(start)))
+	})
+}
+
+// requestLogLine formats a request for the log. It includes only the path
+// and the bat/rssi params: the query can carry ?token=, which must not be
+// logged. Client-supplied values are quoted so they can't forge log lines.
+func requestLogLine(r *http.Request, status int, d time.Duration) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s %q %d %s", r.Method, r.URL.Path, status, d.Round(time.Millisecond))
+	q := r.URL.Query()
+	for _, k := range []string{"bat", "rssi"} {
+		if v := q.Get(k); v != "" {
+			fmt.Fprintf(&b, " %s=%q", k, v)
+		}
+	}
+	return b.String()
 }
 
 // requireToken rejects requests lacking cfg.AuthToken before any render work.
@@ -312,6 +356,10 @@ func (s *server) doRender(d displayData) image.Image {
 
 func (s *server) handleBin(w http.ResponseWriter, r *http.Request) {
 	bat, rssi := statusFromQuery(r)
+	s.mu.Lock()
+	s.deviceSeenAt = time.Now()
+	s.deviceBat = bat
+	s.mu.Unlock()
 	img := s.doRender(s.liveDisplayData(bat, rssi))
 	if b := img.Bounds(); b.Dx() != imgW || b.Dy() != imgH {
 		log.Printf("pack: image %dx%d ≠ expected %dx%d", b.Dx(), b.Dy(), imgW, imgH)
@@ -388,7 +436,8 @@ func demoEvents(loc *time.Location) ([]event, time.Time) {
 
 // handleHealth reports "ok" (200) while the cached events are fresh, and
 // "stale" (503) once no fetch has succeeded for staleAfterIntervals fetch
-// intervals, so monitoring notices a broken feed.
+// intervals, so monitoring notices a broken feed. The device_* lines describe
+// the ESP32's last check-in and don't affect the status.
 func (s *server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	s.mu.RLock()
 	fetchedAt := s.cachedAt
@@ -398,6 +447,7 @@ func (s *server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	if s.lastErr != nil {
 		lastErr = s.lastErr.Error()
 	}
+	deviceSeenAt, deviceBat := s.deviceSeenAt, s.deviceBat
 	s.mu.RUnlock()
 
 	now := time.Now()
@@ -407,6 +457,13 @@ func (s *server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(code)
-	_, _ = fmt.Fprintf(w, "%s\nlast_fetch_age=%s\nevents=%d\nconsecutive_failures=%d\nlast_error=%s\n",
-		status, now.Sub(fetchedAt), n, failures, lastErr)
+	deviceAge, battery := "never", "unknown"
+	if !deviceSeenAt.IsZero() {
+		deviceAge = now.Sub(deviceSeenAt).Round(time.Second).String()
+	}
+	if deviceBat >= 0 {
+		battery = strconv.Itoa(deviceBat) + "%"
+	}
+	_, _ = fmt.Fprintf(w, "%s\nlast_fetch_age=%s\nevents=%d\nconsecutive_failures=%d\nlast_error=%s\ndevice_last_seen_age=%s\ndevice_battery=%s\n",
+		status, now.Sub(fetchedAt), n, failures, lastErr, deviceAge, battery)
 }

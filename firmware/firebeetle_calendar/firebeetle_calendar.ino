@@ -24,7 +24,7 @@
  *   BUSY  -> GPIO 14  (D6)
  *   PWR   -> 3V3  (rev 2.3 HAT only — older rev 2.2 has no PWR pin.
  *                  For max power savings, connect to a free GPIO instead
- *                  and pull LOW before deep sleep to fully cut display power.)
+ *                  and set EPD_PWR below to it.)
  */
 
 #include <WiFi.h>
@@ -47,6 +47,9 @@ const uint16_t SERVER_PORT = 8080;
 #define EPD_DC    22
 #define EPD_RST   21
 #define EPD_BUSY  14
+// GPIO wired to the HAT's PWR pin, or -1 when PWR is tied to 3V3. When set,
+// the display is powered only while drawing and PWR is held LOW in deep sleep.
+constexpr int8_t EPD_PWR = -1;
 
 // FireBeetle 2 ESP32-E battery sensing
 // On the FireBeetle 2 ESP32-E the battery is monitored via GPIO34
@@ -60,6 +63,9 @@ GxEPD2_BW<GxEPD2_750_T7, GxEPD2_750_T7::HEIGHT> display(
 constexpr uint32_t IMG_W = 800;
 constexpr uint32_t IMG_H = 480;
 constexpr uint32_t BUF_BYTES = IMG_W * IMG_H / 8;   // 48000
+
+// Static rather than malloc'd each wake, so there's no out-of-memory path.
+static uint8_t imgBuf[BUF_BYTES];
 
 // Whole wake cycle must finish within this, or the task watchdog resets the
 // board (worst case: 28 s WiFi + 20 s fetch + ~20 s display).
@@ -96,6 +102,22 @@ RTC_DATA_ATTR bool    rtcErrorShown  = false;
 RTC_DATA_ATTR uint8_t rtcBssid[6]    = {0};
 RTC_DATA_ATTR int32_t rtcChannel     = 0;   // 0 = no cached AP
 RTC_DATA_ATTR bool    rtcLowBattShown = false;
+
+// Switches display power via EPD_PWR. Off also latches the pin LOW through
+// deep sleep; on releases that latch first. No-op when EPD_PWR is -1.
+void displayPower(bool on) {
+    if (EPD_PWR < 0) return;
+    gpio_num_t pin = (gpio_num_t)EPD_PWR;
+    gpio_hold_dis(pin);
+    pinMode(EPD_PWR, OUTPUT);
+    digitalWrite(EPD_PWR, on ? HIGH : LOW);
+    if (on) {
+        delay(10);   // let the HAT's supply settle before init
+    } else {
+        gpio_hold_en(pin);
+        gpio_deep_sleep_hold_en();
+    }
+}
 
 void goToSleep(uint64_t seconds) {
     Serial.flush();
@@ -184,14 +206,22 @@ int batteryPercent(uint32_t mv) {
     return 0;
 }
 
-// On success, *sleepSecs is the server's X-Sleep-Seconds, or DEFAULT_SLEEP_S
-// when that header is absent or out of range.
-bool fetchImage(uint8_t* buf, int batPct, int rssi, uint64_t* sleepSecs,
+// On success, *wakeAtMs is the millis() at which to wake: the server's
+// X-Sleep-Seconds (or DEFAULT_SLEEP_S when that header is absent or out of
+// range) counted from when the response arrived, so the time spent drawing
+// comes out of the sleep. batPct < 0 means no battery reading; bat is omitted.
+bool fetchImage(uint8_t* buf, int batPct, int rssi, uint32_t* wakeAtMs,
                 char* reason, size_t reasonLen) {
     char url[160];
-    snprintf(url, sizeof(url),
-             "http://%s:%u/calendar.bin?bat=%d&rssi=%d",
-             SERVER_HOST, SERVER_PORT, batPct, rssi);
+    if (batPct >= 0) {
+        snprintf(url, sizeof(url),
+                 "http://%s:%u/calendar.bin?bat=%d&rssi=%d",
+                 SERVER_HOST, SERVER_PORT, batPct, rssi);
+    } else {
+        snprintf(url, sizeof(url),
+                 "http://%s:%u/calendar.bin?rssi=%d",
+                 SERVER_HOST, SERVER_PORT, rssi);
+    }
 
     Serial.printf("GET %s\n", url);
 
@@ -221,9 +251,10 @@ bool fetchImage(uint8_t* buf, int batPct, int rssi, uint64_t* sleepSecs,
         return false;
     }
     long serverSleep = http.header("X-Sleep-Seconds").toInt();
-    *sleepSecs = (serverSleep >= MIN_SLEEP_S && serverSleep <= MAX_SLEEP_S)
-                     ? (uint64_t)serverSleep
-                     : DEFAULT_SLEEP_S;
+    uint64_t sleepSecs = (serverSleep >= MIN_SLEEP_S && serverSleep <= MAX_SLEEP_S)
+                             ? (uint64_t)serverSleep
+                             : DEFAULT_SLEEP_S;
+    *wakeAtMs = millis() + (uint32_t)(sleepSecs * 1000ULL);
 
     int len = http.getSize();
     if (len != (int)BUF_BYTES) {
@@ -261,6 +292,7 @@ bool fetchImage(uint8_t* buf, int batPct, int rssi, uint64_t* sleepSecs,
 }
 
 void drawBuffer(const uint8_t* buf) {
+    displayPower(true);
     display.init(115200, false, 2, false);
     display.setRotation(0);
     display.setFullWindow();
@@ -272,9 +304,11 @@ void drawBuffer(const uint8_t* buf) {
         display.drawInvertedBitmap(0, 0, buf, IMG_W, IMG_H, GxEPD_BLACK);
     } while (display.nextPage());
     display.hibernate();
+    displayPower(false);
 }
 
 void drawError(const char* title, const char* detail, const char* statusLine) {
+    displayPower(true);
     display.init(115200, false, 2, false);
     display.setRotation(0);
     display.setFullWindow();
@@ -292,6 +326,7 @@ void drawError(const char* title, const char* detail, const char* statusLine) {
         display.print(statusLine);
     } while (display.nextPage());
     display.hibernate();
+    displayPower(false);
 }
 
 // Records a failed wake, shows the error screen once the failure streak
@@ -328,11 +363,12 @@ void setup() {
 
     // Read battery BEFORE WiFi powers up (cleaner reading).
     uint32_t mv = readBatteryMv();
-    int batPct = batteryPercent(mv);
+    bool battSensed = mv > NO_BATT_SENSE_MV;
+    int batPct = battSensed ? batteryPercent(mv) : -1;
     Serial.printf("battery: %u mV (%d%%)\n", mv, batPct);
 
     uint32_t lowCutoff = rtcLowBattShown ? LOW_BATT_RECOVER_MV : LOW_BATT_MV;
-    if (mv > NO_BATT_SENSE_MV && mv < lowCutoff) {
+    if (battSensed && mv < lowCutoff) {
         Serial.println("battery low — rechecking later");
         if (!rtcLowBattShown) {
             char detail[48];
@@ -344,33 +380,34 @@ void setup() {
     }
     rtcLowBattShown = false;
 
+    char batStr[8];
+    if (battSensed) {
+        snprintf(batStr, sizeof(batStr), "%d%%", batPct);
+    } else {
+        snprintf(batStr, sizeof(batStr), "n/a");
+    }
     char status[40];
-    snprintf(status, sizeof(status), "battery %d%%", batPct);
+    snprintf(status, sizeof(status), "battery %s", batStr);
     if (!connectWiFi()) {
         failAndSleep("WiFi connect failed", wifiStatusStr(WiFi.status()), status);
     }
     int rssi = WiFi.RSSI();
     Serial.printf("rssi: %d dBm\n", rssi);
-    snprintf(status, sizeof(status), "battery %d%%  rssi %d dBm", batPct, rssi);
-
-    uint8_t* buf = (uint8_t*)malloc(BUF_BYTES);
-    if (!buf) {
-        failAndSleep("Out of memory", "malloc failed", status);
-    }
+    snprintf(status, sizeof(status), "battery %s  rssi %d dBm", batStr, rssi);
 
     char reason[64];
-    uint64_t sleepSecs = DEFAULT_SLEEP_S;
-    if (!fetchImage(buf, batPct, rssi, &sleepSecs, reason, sizeof(reason))) {
-        free(buf);
+    uint32_t wakeAtMs = 0;
+    if (!fetchImage(imgBuf, batPct, rssi, &wakeAtMs, reason, sizeof(reason))) {
         failAndSleep("Calendar fetch failed", reason, status);
     }
-    drawBuffer(buf);
-    free(buf);
+    drawBuffer(imgBuf);
 
     rtcFailCount = 0;
     rtcErrorShown = false;
     WiFi.disconnect(true);
     WiFi.mode(WIFI_OFF);
+    int32_t remainingMs = (int32_t)(wakeAtMs - millis());
+    uint64_t sleepSecs = remainingMs > 1000 ? (uint64_t)remainingMs / 1000ULL : 1ULL;
     Serial.printf("sleeping %llus\n", sleepSecs);
     goToSleep(sleepSecs);
 }

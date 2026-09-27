@@ -58,7 +58,9 @@ constexpr int8_t EPD_PWR = -1;
 #define BATT_ADC_PIN  34
 
 // Waveshare 7.5" 800x480 B/W — GDEY075T7, UC8179 controller.
-GxEPD2_BW<GxEPD2_750_T7, GxEPD2_750_T7::HEIGHT> display(
+// Paged (a quarter of the panel per page): a full-height frame buffer plus
+// imgBuf doesn't fit in DRAM. The firstPage/nextPage loops draw every page.
+GxEPD2_BW<GxEPD2_750_T7, GxEPD2_750_T7::HEIGHT / 4> display(
     GxEPD2_750_T7(EPD_CS, EPD_DC, EPD_RST, EPD_BUSY));
 
 constexpr uint32_t IMG_W = 800;

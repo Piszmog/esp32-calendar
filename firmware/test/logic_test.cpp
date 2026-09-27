@@ -1,5 +1,5 @@
 // Host-side tests for calendar_logic.h. Build and run from the repo root:
-//   c++ -std=c++17 -Wall -Wextra -Werror -I firmware/firebeetle_calendar \
+//   c++ -std=c++17 -Wall -Wextra -Werror -I firmware/firebeetle_calendar
 //       firmware/test/logic_test.cpp -o logic_test && ./logic_test
 
 #include "calendar_logic.h"

@@ -30,7 +30,7 @@ golangci-lint run                               # strict default: all config
 
 # Test
 go test ./...                                   # must pass before any server/ change is considered done
-go test ./internal/calendar -run Golden -update # regenerate testdata/golden.png after an intended layout change
+go test ./internal/calendar -run Golden -update # regenerate testdata/golden/*.png after an intended layout change; review each PNG
 go test -run '^$' -fuzz=FuzzEventsFromICS -fuzztime=60s ./internal/calendar  # fuzz (seeds run in plain go test)
 
 # Firmware host tests (from repo root)

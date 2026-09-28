@@ -63,11 +63,11 @@ const (
 	sectionHeadRuleY = 24.0
 	tomorrowGap      = 10.0
 	weekHeaderGap    = 30.0
-	weekRowH         = 64.0
-	weekTextOffY     = 6.0
-	weekDashOffY     = 32.0
-	weekSummaryOffY  = 30.0
-	weekMoreOffY     = 50.0
+	weekRowH         = 68.0
+	weekTextOffY     = 4.0
+	weekDashOffY     = 28.0
+	weekSummaryOffY  = 26.0
+	weekMoreOffY     = 48.0
 
 	// Footer constants.
 	footerH           = 32.0

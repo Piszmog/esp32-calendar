@@ -45,7 +45,8 @@ API keys, or OAuth setup is required.
 
 > **Keep this URL secret.** Anyone with the link can read your calendar events.
 > If it is ever exposed, rotate it by clicking **Reset** on the same Integrate
-> calendar page and updating the `-ical-url` flag in your service unit.
+> calendar page, then updating `ICAL_URL` in `~/calendar/calendar.env` and
+> running `sudo systemctl restart calendar`.
 
 ## 2. Wire the display
 
@@ -65,8 +66,8 @@ Waveshare 7.5" V2 e-paper HAT → FireBeetle 2 ESP32-E:
 
 The PWR pin only exists on the **rev 2.3** Driver HAT. Older rev 2.2 HATs don't
 have it — skip that row. For extra battery savings you can connect PWR to a spare
-GPIO instead of 3V3 and pull it LOW before `esp_deep_sleep_start()` to fully cut
-display power between refreshes.
+GPIO instead of 3V3 and set `EPD_PWR` to that GPIO in the `.ino`; the firmware
+then powers the display only while drawing and holds PWR LOW during deep sleep.
 
 ## 3. Build the server
 
@@ -79,10 +80,11 @@ curl -L -o calendar-display.tar.gz \
 tar -xzf calendar-display.tar.gz
 ```
 
-The tarball contains `calendar-server`, `README.md`,
+The tarball contains `calendar-server`, `README.md`, `DEVELOPMENT.md`,
 `firmware/firebeetle_calendar/firebeetle_calendar.ino`,
-`firmware/firebeetle_calendar/secrets.h.example`, and
-`deploy/calendar.service`.
+`firmware/firebeetle_calendar/calendar_logic.h`,
+`firmware/firebeetle_calendar/secrets.h.example`,
+`deploy/calendar.service`, and `deploy/calendar.env.example`.
 
 **Option B — Build locally.** Install
 [goreleaser](https://goreleaser.com/install/), then from the repo root:
@@ -134,6 +136,9 @@ The file should look like:
 
 ```sh
 ICAL_URL=https://calendar.google.com/calendar/ical/<id>/private-<token>/basic.ics
+# Optional: require this token on /calendar.* (set the same AUTH_TOKEN in the
+# firmware's secrets.h; add ?token=... when previewing in a browser)
+AUTH_TOKEN=
 ```
 
 ### Install the systemd unit
@@ -181,7 +186,7 @@ Endpoints:
 |-----|---------|
 | `http://<pi>:8080/calendar.png` | Preview in any browser |
 | `http://<pi>:8080/calendar.bin` | Packed 1-bit bitmap the ESP32 fetches |
-| `http://<pi>:8080/healthz`      | Plain-text health + last-fetch age |
+| `http://<pi>:8080/healthz`      | Plain-text health: 200 `ok`, or 503 `stale` after 3 fetch intervals without a successful fetch. Also shows `device_last_seen_age` and `device_battery` from the ESP32's last check-in |
 
 ## 5. Flash the firmware
 
@@ -199,6 +204,13 @@ Endpoints:
    const char* WIFI_PASS   = "your-password";
    const char* SERVER_HOST = "192.168.1.50";  // Pi's static IP
    ```
+   A `.local` hostname also works if the Pi runs Avahi (Raspberry Pi OS does
+   by default); the ESP32 resolves it via mDNS without extra setup.
+
+   Optional: uncomment `STATIC_IP`, `STATIC_GATEWAY`, `STATIC_SUBNET`, and
+   `STATIC_DNS` to give the ESP32 a fixed address. Skipping DHCP shortens
+   every wake by a second or two of radio time. Pick an address outside your
+   router's DHCP pool.
 2. Open `firmware/firebeetle_calendar/firebeetle_calendar.ino`. Edit
    `SERVER_PORT` in the `USER CONFIG` block if needed.
 3. **Tools → Board → DFRobot FireBeetle 2 ESP32-E** (or "ESP32 Dev Module").
@@ -229,8 +241,9 @@ On Apple Silicon you may need to approve it once under **System Settings → Pri
 | Timezone | `-tz` flag in `deploy/calendar.service` |
 | How often the server polls the iCal feed | `-fetch-interval` flag (default `10m`) |
 | Which calendar | Set `ICAL_URL` in `~/calendar/calendar.env` to that calendar's **Secret address in iCal format** (Settings → Integrate calendar) |
-| How often the display refreshes | Fixed: aligns to the next :00/:30 wall-clock mark (≈30 min). To change the cadence, edit `nextWakeSeconds()` in the `.ino`. |
+| How often the display refreshes | Aligns to the next :00/:30 mark in the server's `-tz` (≈30 min); the server sends the sleep time as `X-Sleep-Seconds`. To change the cadence, edit `wakeMark` in `server/internal/calendar/server.go`. |
 | Past-event cutoff | `now.Add(-30 * time.Minute)` in `server/internal/calendar/render.go` |
+| Declined meetings | Hidden automatically when the feed's calendar name is your email (Google's primary calendar); other calendars show everything |
 
 To preview layout changes without flashing: run the server locally with
 `./calendar-server -ical-url <your-url> -listen :8080` and open
@@ -280,6 +293,13 @@ gitignored and preserved across `git pull`.
 
 A 2000 mAh LiPo gets ~80 days between charges; a 5000 mAh battery gets 6+ months.
 
+- **Failures back off.** A failed wake (WiFi, server, or fetch) retries after
+  5, then 15, 30, and 60 minutes. The last calendar stays on screen until 3
+  failures in a row, then an error screen is drawn once.
+- **Low-battery cutoff.** Below 3.4 V the display shows "Battery low" and the
+  board only re-checks the battery every 2 hours. It resumes on its own once
+  the battery is back above 3.6 V.
+
 ## 9. Enclosure
 
 3D-printed case: [Weather Station E-Ink Frame](https://www.printables.com/model/1139047-weather-station-e-ink-frame).
@@ -289,13 +309,17 @@ A 2000 mAh LiPo gets ~80 days between charges; a 5000 mAh battery gets 6+ months
 | Symptom | First thing to check |
 |---------|---------------------|
 | Service won't start | `journalctl -u calendar -n 50 --no-pager` |
-| Server exits immediately | `ical URL required` → `ICAL_URL` not set in `calendar.env` or wrong path; `invalid timezone` → bad `-tz` value |
+| Server exits immediately | `ical URL required` → `ICAL_URL` not set in `calendar.env` or wrong path; `invalid timezone` / `timezone required` → bad or empty `-tz` value; `fetch interval must be positive` → bad `-fetch-interval` |
+| `/healthz` returns 503 `stale`, or the display footer says "(stale)" | Fetches are failing — `last_error=` in the `/healthz` body says why |
 | `fetch ical: unexpected HTTP status` in logs | The secret iCal URL was reset or is wrong — re-copy it from Google Calendar → Settings → Integrate calendar and update `calendar.env`, then `systemctl restart calendar` |
 | Port 8080 unreachable from ESP32 | `sudo ufw status` on the Pi — allow port 8080 if a firewall is active |
 | Serial shows WiFi failure / no IP | `WIFI_SSID` / `WIFI_PASS` in `firmware/firebeetle_calendar/secrets.h` |
 | Serial shows HTTP 404 or connection refused | `SERVER_HOST` wrong, or service not running — `systemctl status calendar` on the Pi |
+| Did the ESP32 check in? | `journalctl -u calendar \| grep calendar.bin` — each request logs status, duration, and the reported `bat`/`rssi`; a `401` means `AUTH_TOKEN` differs between `calendar.env` and `secrets.h` |
 | ESP32 boots but display stays blank | Re-check wiring (section 2), or a pack/draw convention mismatch (see DEVELOPMENT.md) |
 | Image is inverted | In the firmware, swap `drawInvertedBitmap` → `drawBitmap` |
-| Battery reads 0% always | Confirm your FireBeetle has the battery sense voltage divider on GPIO34 (some clones omit it); adjust calibration in `batteryPercent()` in the `.ino` |
+| Display says "Battery low" | Charge the LiPo; the board re-checks every 2 hours and resumes on its own (press reset to resume immediately) |
+| Battery icon missing from the footer | The board read under 2.5 V on GPIO34, which means no battery sense divider (some clones omit it), so it doesn't report a battery level |
+| Battery reads 0% always | Adjust calibration in `batteryPercent()` in the `.ino` |
 | Battery icon obviously wrong | Adjust the LiPo curve in `batteryPercent()` in the `.ino` |
 | `arduino-cli` can't find the board | macOS CP2102 driver approval (see section 5); re-run `arduino-cli board list` |

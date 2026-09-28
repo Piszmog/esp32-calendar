@@ -30,6 +30,12 @@ golangci-lint run                               # strict default: all config
 
 # Test
 go test ./...                                   # must pass before any server/ change is considered done
+go test ./internal/calendar -run Golden -update # regenerate testdata/golden/*.png after an intended layout change; review each PNG
+go test -run '^$' -fuzz=FuzzEventsFromICS -fuzztime=60s ./internal/calendar  # fuzz (seeds run in plain go test)
+
+# Firmware host tests (from repo root)
+c++ -std=c++17 -Wall -Wextra -Werror -I firmware/firebeetle_calendar \
+  firmware/test/logic_test.cpp -o logic_test && ./logic_test
 
 # Preview (run locally, visit http://localhost:8080/calendar.png)
 ./calendar-server -ical-url <your-secret-ical-url> -listen :8080
@@ -67,7 +73,7 @@ golangci-lint run
 | File | Responsibility |
 |---|---|
 | `server.go` | `Config`, `Run`, `server` struct, HTTP handlers, refresh loop |
-| `fetch.go` | `event` type, `fetchEvents` dispatcher |
+| `fetch.go` | `event` type, `fetchTimeout` |
 | `fetch_ical.go` | iCal HTTP fetch, parse, and event filtering |
 | `render.go` | `buildDisplayData`, `renderImage`, DejaVu font embedding |
 | `icons.go` | WiFi bar and battery icon primitives |
@@ -95,19 +101,35 @@ a test file to `package calendar` — keep the blackbox boundary intact.
 - **Bitmap size is a hard protocol contract.** 800×480 = 48000 bytes. If you change `imgW`/`imgH` in `render.go`, you must also update `IMG_W`/`IMG_H` in the `.ino` and reflash the firmware. There is no version handshake — a size mismatch causes the ESP32 to skip the refresh.
 - **Pack convention is paired.** `pack1Bit` writes MSB-first, bit=1=white. The firmware reads it with `drawInvertedBitmap(..., GxEPD_BLACK)`, which paints black where the bit is 0. If either side changes this convention, the image inverts.
 - **Keep the export surface minimal.** `Config`, `Run` is intentional. Don't add exports unless `cmd/server` genuinely needs them.
-- **Font `init()` panics on bad embed.** `render.go`'s `init()` calls `truetype.Parse` on the embedded TTFs and panics on failure. Don't remove the embedded font files.
-- **Past-event cutoff:** events starting more than 30 minutes ago are hidden. The constant is `now.Add(-30 * time.Minute)` in `render.go:buildDisplayData`.
-- **Startup is fail-fast.** `Run` validates timezone, checks that `ICalURL` is non-empty (error: `ical URL required: set ICAL_URL env var or -ical-url flag`), then performs an initial synchronous calendar fetch; any misconfiguration fails immediately rather than serving a stale image.
-- **iCal URL is a bearer token.** In production, supply it via the `ICAL_URL` env var (sourced from a `chmod 600` `EnvironmentFile` in the systemd unit) — **not** as a `-ical-url` flag, which would be visible in `ps`. The flag is fine for local dev.
-- **No authentication on HTTP endpoints.** The default `-listen :8080` binds to all interfaces; anyone on the LAN can fetch `/calendar.bin` (which contains event titles) or the PNG preview. If this is a concern, bind to `127.0.0.1:8080` and front with a reverse proxy, or restrict firewall rules.
+- **Fonts panic on bad embed.** `render.go`'s `loadFonts` (`sync.OnceValue`) calls `truetype.Parse` on the embedded TTFs and panics on failure; `Run` calls it before the first fetch so this happens at startup. Don't remove the embedded font files.
+- **Past-event cutoff:** timed events starting more than 30 minutes ago are hidden unless their `End` is still in the future. The constant is `now.Add(-30 * time.Minute)` in `render.go:buildDisplayData`.
+- **Multi-day timed events** appear on every day they cover (`timedSpan`); on continuation days `onDay` shows them as all-day so the start time isn't repeated. An event ending exactly at midnight doesn't cover the next day.
+- **Cancelled events** (`STATUS:CANCELLED`) are dropped in `eventsFromCal`, but still register as RECURRENCE-ID overrides so the base-series slot stays suppressed.
+- **Declined events** are dropped the same way when the owner's ATTENDEE has `PARTSTAT=DECLINED`. The owner comes from `X-WR-CALNAME` (`selfEmail`), which Google sets to the email on a primary calendar; if that name isn't an email, the filter is off.
+- **Titles only keep glyphs the fonts have.** `parseIcalEvent` runs SUMMARY through `dropMissingGlyphs`, so emoji don't draw as boxes; a title that becomes empty falls back to "(no title)".
+- **Startup is fail-fast.** `Run` validates timezone (non-empty, loadable) and `FetchInterval` (> 0), checks that `ICalURL` is non-empty (error: `ical URL required: set ICAL_URL env var or -ical-url flag`), then performs an initial synchronous calendar fetch; any misconfiguration fails immediately rather than serving a stale image.
+- **iCal URL is a bearer token.** In production, supply it via the `ICAL_URL` env var (sourced from a `chmod 600` `EnvironmentFile` in the systemd unit) — **not** as a `-ical-url` flag, which would be visible in `ps`. The flag is fine for local dev. Fetch errors go through `redactURL` so the URL never reaches logs or `/healthz`.
+- **Staleness threshold.** Data is stale after `staleAfterIntervals` (3) × `FetchInterval` without a successful fetch: `/healthz` returns 503 and the footer shows "(stale)". The footer's "Updated HH:MM" is the fetch time, not the render time.
+- **Device check-in is informational.** `handleBin` records the last request time and battery; `/healthz` prints them as `device_last_seen_age` / `device_battery` but they never change its status code.
+- **Request logging never logs the query string.** `requestLogLine` logs method, path, status, duration, and only the `bat`/`rssi` params, quoted — `?token=` must not reach the journal.
+- **Routes are GET-only.** `routes()` uses `GET /path` patterns (HEAD matches too); other methods get 405 before any render.
+- **Recurrences expand in the event's own zone.** `parseIcalDatetime` keeps the TZID/UTC zone so RRULE follows that zone's DST; `eventsFromCal` converts every event to the configured zone via `inLoc`. golang-ical parses floating and DATE values of EXDATE/RDATE/RECURRENCE-ID in `time.Local`; `anchorFloating` re-reads them in the configured zone. All-day occurrence ends are computed in whole days, not hours, so DST days don't shorten them.
+- **Week Ahead fits by pixels.** `summarizeDay` takes a fit predicate; production passes `weekSummaryFits` (measures in the summary face, takes `renderMu`), and events that don't fit are counted in "+ N more".
+- **Optional token auth.** When `AuthToken` (`AUTH_TOKEN` env / `-auth-token`) is set, `requireToken` rejects `/calendar.*` requests lacking `Authorization: Bearer <token>` or `?token=<token>` with 401 before rendering. `/healthz` stays open. With no token (the default) every endpoint is open to the LAN. The firmware sends `AUTH_TOKEN` from `secrets.h` (defaults to empty for older `secrets.h` files).
+- **Server owns the wake schedule.** `handleBin` sets `X-Sleep-Seconds` (`sleepSeconds`: next :00/:30 in the server timezone, skipping marks closer than `wakeGuard`). The firmware has no NTP; it falls back to 30 min if the header is missing or out of range.
+- **Font faces are cached and not goroutine-safe.** `face()` returns shared faces from `loadFonts()`; `renderImage` holds `fontSet.renderMu` for the whole render. Don't call `face()` outside a render.
+- **Firmware contract is tested.** `protocol_test.go` reads the `.ino` and `calendar_logic.h` and checks `IMG_W`/`IMG_H`, the query params, `drawInvertedBitmap(..., GxEPD_BLACK)`, `X-Sleep-Seconds` and `Authorization`; it also checks every `sleepSeconds` value lies within the firmware's `MIN_SLEEP_S`..`MAX_SLEEP_S`. Update both sides together.
 
 ## Linter notes (`server/.golangci.yml`)
 
 - `default: all` — every linter is on unless explicitly disabled.
 - `exhaustruct` is disabled — too much churn from third-party struct literals (`http.Server`, `truetype.Options`) and from its `v5` rename breaking config compatibility.
 - `tagliatelle` requires snake_case JSON tags.
-- `_test.go` files relax `funlen`, `maintidx`, and `err113`.
+- `_test.go` files relax `funlen`, `maintidx`, `err113`, `gosmopolitan`, `gochecknoglobals`, and gosec G101/G117/G306/G703.
+- Non-test exclusions: `gochecknoglobals` for `loadFonts`, gosec G706 in `server.go`, and `gosmopolitan` `time.Local` in `fetch_ical.go` (`anchorFloating`).
+- `formatters:` enables `gofmt` and `goimports` — in golangci v2 these are separate from `linters.default: all`.
+- `gomodguard` is disabled only because it is deprecated; `gomodguard_v2` still runs.
 
 ## Firmware (`firmware/firebeetle_calendar/firebeetle_calendar.ino`)
 
-Arduino sketch; built via Arduino IDE (not `go` or `make`). Before flashing, copy `firmware/firebeetle_calendar/secrets.h.example` → `firmware/firebeetle_calendar/secrets.h` and fill in `WIFI_SSID`, `WIFI_PASS`, `SERVER_HOST`. `SERVER_PORT` and `SLEEP_MINUTES` are set directly in the `USER CONFIG` block of the `.ino`. `secrets.h` is gitignored; `.claude/settings.json` also blocks Claude from reading it. Battery voltage is read from GPIO34 through a 1:2 internal divider; calibration lives in `batteryPercent()`.
+Arduino sketch; built via Arduino IDE (not `go` or `make`). Before flashing, copy `firmware/firebeetle_calendar/secrets.h.example` → `firmware/firebeetle_calendar/secrets.h` and fill in `WIFI_SSID`, `WIFI_PASS`, `SERVER_HOST`. `SERVER_PORT` is set directly in the `USER CONFIG` block of the `.ino`; `EPD_PWR` (GPIO wired to the HAT's PWR pin, `-1` = tied to 3V3) is next to the pin map. The image buffer is a static `imgBuf`. The firmware omits `bat` when the reading is under `NO_BATT_SENSE_MV` (no sense divider), and counts the sleep from when the response arrived, so draw time comes out of it. Optional `STATIC_IP`/`STATIC_GATEWAY`/`STATIC_SUBNET`/`STATIC_DNS` macros in `secrets.h` (comma-separated octets) make `connectWiFi()` skip DHCP; CI's dummy `secrets.h` defines them so that branch compiles. Pure wake-cycle logic (battery curve and low-battery hysteresis/draw-once step, backoff and error-screen streak, response status/size check, sleep-header clamp, millis-wrap sleep math, request path) lives in `calendar_logic.h`, which must stay free of Arduino headers: `firmware/test/logic_test.cpp` compiles it with the host `c++` in CI's `Firmware Unit Tests` job. `secrets.h` is gitignored; `.claude/settings.json` also blocks Claude from reading it. Battery voltage is read from GPIO34 through a 1:2 internal divider; calibration lives in `batteryPercent()`.

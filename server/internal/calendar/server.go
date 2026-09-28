@@ -1,10 +1,11 @@
-// Package calendar fetches events from Google Calendar, renders them as a
+// Package calendar fetches events from an iCal feed, renders them as a
 // 1-bit bitmap matching the layout for a Waveshare 7.5" e-paper, and serves
 // the bitmap (plus a PNG preview) over HTTP.
 package calendar
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"image"
@@ -13,26 +14,42 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
-
 )
 
-var errNoICalURL = errors.New("ical URL required: set ICAL_URL env var or -ical-url flag")
+var (
+	errNoICalURL        = errors.New("ical URL required: set ICAL_URL env var or -ical-url flag")
+	errNoTimezone       = errors.New("timezone required: set -tz to an IANA name, e.g. America/New_York")
+	errBadFetchInterval = errors.New("fetch interval must be positive")
+)
 
 const (
-	shutdownTimeout   = 5 * time.Second
-	httpReadTimeout   = 10 * time.Second
-	httpWriteTimeout  = 30 * time.Second
-	demoDefaultRSSI   = -55
-	demoDefaultBatPct = 87
-	maxBatPct         = 100
+	shutdownTimeout       = 5 * time.Second
+	httpReadHeaderTimeout = 5 * time.Second
+	httpReadTimeout       = 10 * time.Second
+	httpWriteTimeout      = 30 * time.Second
+	httpIdleTimeout       = 60 * time.Second
+	// staleAfterIntervals is how many fetch intervals may pass without a
+	// successful fetch before the data is reported stale (healthz 503 and a
+	// "(stale)" marker in the footer).
+	staleAfterIntervals = 3
+	demoDefaultRSSI     = -55
+	demoDefaultBatPct   = 87
+	maxBatPct           = 100
 	// rssiUnknown is the sentinel returned by statusFromQuery when the rssi
 	// query param is absent. Any positive value is impossible for real WiFi
 	// RSSI (always negative dBm), so 1 is unambiguous.
 	rssiUnknown = 1
 	rssiMin     = -120
+	// wakeMark is the wall-clock cadence the ESP32 aligns its wakes to.
+	wakeMark = 30 * time.Minute
+	// wakeGuard pushes a wake that would land within this of the next mark to
+	// the following one. It exceeds the ESP32 RTC slow-clock drift over one
+	// sleep (~90 s), so an early wake doesn't cause a second full cycle.
+	wakeGuard = 3 * time.Minute
 )
 
 // Config holds all runtime configuration. The zero value is not useful;
@@ -42,39 +59,51 @@ type Config struct {
 	ICalURL       string
 	Timezone      string
 	FetchInterval time.Duration
+	// AuthToken, when non-empty, is required on every endpoint except
+	// /healthz, as "Authorization: Bearer <token>" or "?token=<token>".
+	AuthToken string
 }
 
 // server is the running HTTP service. It holds the most recent batch of
-// events from Google Calendar and re-renders the image on every request.
+// events from the iCal feed and re-renders the image on every request.
 type server struct {
 	cfg      Config
 	loc      *time.Location
 	mu       sync.RWMutex
 	cached   []event
 	cachedAt time.Time
+	// lastErr and consecutiveFailures describe fetches since the last success.
+	lastErr             error
+	consecutiveFailures int
+	// deviceSeenAt and deviceBat record the ESP32's last /calendar.bin
+	// request, so /healthz shows when the display last checked in.
+	deviceSeenAt time.Time
+	deviceBat    int
 	// renderFn overrides renderImage when non-nil; used only in tests.
-	renderFn func(displayData) (image.Image, error)
+	renderFn func(displayData) image.Image
 }
 
 // Run starts the HTTP server and blocks until SIGINT/SIGTERM.
 // It performs an initial calendar fetch synchronously so a misconfigured
-// deployment (missing creds, bad timezone, network down) fails fast.
+// deployment (bad config, network down) fails fast.
 func Run(cfg Config) error {
-	loc, err := time.LoadLocation(cfg.Timezone)
+	loc, err := validateConfig(cfg)
 	if err != nil {
-		return fmt.Errorf("invalid timezone %q: %w", cfg.Timezone, err)
+		return err
 	}
 
-	if cfg.ICalURL == "" {
-		return errNoICalURL
-	}
+	// Parse the embedded fonts now so a bad embed fails at startup, not on
+	// the first request.
+	loadFonts()
+
 	s := &server{
-		cfg:      cfg,
-		loc:      loc,
-		mu:       sync.RWMutex{},
-		cached:   nil,
-		cachedAt: time.Time{},
-		renderFn: nil,
+		cfg:       cfg,
+		loc:       loc,
+		mu:        sync.RWMutex{},
+		cached:    nil,
+		cachedAt:  time.Time{},
+		renderFn:  nil,
+		deviceBat: -1,
 	}
 
 	if err := s.refresh(context.Background()); err != nil {
@@ -85,17 +114,13 @@ func Run(cfg Config) error {
 	var loopDone sync.WaitGroup
 	loopDone.Go(func() { s.refreshLoop(ctx) })
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/calendar.bin", s.handleBin)
-	mux.HandleFunc("/calendar.png", s.handlePNG)
-	mux.HandleFunc("/calendar.demo.png", s.handleDemoPNG)
-	mux.HandleFunc("/healthz", s.handleHealth)
-
 	srv := &http.Server{
-		Addr:         cfg.ListenAddr,
-		Handler:      mux,
-		ReadTimeout:  httpReadTimeout,
-		WriteTimeout: httpWriteTimeout,
+		Addr:              cfg.ListenAddr,
+		Handler:           s.routes(),
+		ReadHeaderTimeout: httpReadHeaderTimeout,
+		ReadTimeout:       httpReadTimeout,
+		WriteTimeout:      httpWriteTimeout,
+		IdleTimeout:       httpIdleTimeout,
 	}
 
 	serveErr := make(chan error, 1)
@@ -120,6 +145,93 @@ func Run(cfg Config) error {
 	}
 
 	return gracefulShutdown(srv, cancel, &loopDone, serveErr)
+}
+
+// routes returns the HTTP handler for all endpoints. GET patterns also match
+// HEAD; other methods get 405 before any render work.
+func (s *server) routes() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /calendar.bin", s.requireToken(s.handleBin))
+	mux.HandleFunc("GET /calendar.png", s.requireToken(s.handlePNG))
+	mux.HandleFunc("GET /calendar.demo.png", s.requireToken(s.handleDemoPNG))
+	mux.HandleFunc("GET /healthz", s.handleHealth)
+	return logRequests(mux)
+}
+
+// statusRecorder captures the status code a handler writes.
+type statusRecorder struct {
+	http.ResponseWriter
+
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	r.status = code
+	r.ResponseWriter.WriteHeader(code)
+}
+
+// logRequests logs one line per request so journalctl shows whether the
+// ESP32 checked in, what it reported, and what it got back.
+func logRequests(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(rec, r)
+		log.Print(requestLogLine(r, rec.status, time.Since(start)))
+	})
+}
+
+// requestLogLine formats a request for the log. It includes only the path
+// and the bat/rssi params: the query can carry ?token=, which must not be
+// logged. Client-supplied values are quoted so they can't forge log lines.
+func requestLogLine(r *http.Request, status int, d time.Duration) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s %q %d %s", r.Method, r.URL.Path, status, d.Round(time.Millisecond))
+	q := r.URL.Query()
+	for _, k := range []string{"bat", "rssi"} {
+		if v := q.Get(k); v != "" {
+			fmt.Fprintf(&b, " %s=%q", k, v)
+		}
+	}
+	return b.String()
+}
+
+// requireToken rejects requests lacking cfg.AuthToken before any render work.
+// With no token configured it is a pass-through.
+func (s *server) requireToken(next http.HandlerFunc) http.HandlerFunc {
+	if s.cfg.AuthToken == "" {
+		return next
+	}
+	want := []byte(s.cfg.AuthToken)
+	return func(w http.ResponseWriter, r *http.Request) {
+		got := r.URL.Query().Get("token")
+		if bearer, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer "); ok {
+			got = bearer
+		}
+		if subtle.ConstantTimeCompare([]byte(got), want) != 1 {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next(w, r)
+	}
+}
+
+// validateConfig checks cfg and returns the loaded timezone.
+func validateConfig(cfg Config) (*time.Location, error) {
+	if cfg.Timezone == "" {
+		return nil, errNoTimezone
+	}
+	loc, err := time.LoadLocation(cfg.Timezone)
+	if err != nil {
+		return nil, fmt.Errorf("invalid timezone %q: %w", cfg.Timezone, err)
+	}
+	if cfg.FetchInterval <= 0 {
+		return nil, fmt.Errorf("%w, got %s", errBadFetchInterval, cfg.FetchInterval)
+	}
+	if cfg.ICalURL == "" {
+		return nil, errNoICalURL
+	}
+	return loc, nil
 }
 
 // gracefulShutdown stops the HTTP server, cancels the refresh loop, and
@@ -163,24 +275,46 @@ func (s *server) refreshLoop(ctx context.Context) {
 }
 
 func (s *server) refresh(ctx context.Context) error {
-	events, err := fetchEvents(ctx, s.cfg, s.loc)
+	events, err := fetchEventsIcal(ctx, s.cfg.ICalURL, s.loc)
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if err != nil {
+		s.lastErr = err
+		s.consecutiveFailures++
 		return err
 	}
-	s.mu.Lock()
 	s.cached = events
 	s.cachedAt = time.Now()
-	s.mu.Unlock()
+	s.lastErr = nil
+	s.consecutiveFailures = 0
 	log.Printf("refreshed: %d events", len(events))
 	return nil
 }
 
-func (s *server) snapshot() []event {
+// snapshot returns a copy of the cached events and when they were fetched.
+func (s *server) snapshot() ([]event, time.Time) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	cp := make([]event, len(s.cached))
 	copy(cp, s.cached)
-	return cp
+	return cp, s.cachedAt
+}
+
+// isStale reports whether data fetched at fetchedAt is older than
+// staleAfterIntervals fetch intervals.
+func (s *server) isStale(fetchedAt, now time.Time) bool {
+	return now.Sub(fetchedAt) > staleAfterIntervals*s.cfg.FetchInterval
+}
+
+// liveDisplayData builds the display data for the cached events, including
+// fetch time and staleness for the footer.
+func (s *server) liveDisplayData(bat, rssi int) displayData {
+	events, fetchedAt := s.snapshot()
+	now := time.Now().In(s.loc)
+	data := buildDisplayData(events, s.loc, bat, rssi, now)
+	data.FetchedAt = fetchedAt.In(s.loc)
+	data.Stale = s.isStale(fetchedAt, now)
+	return data
 }
 
 // statusFromQuery parses ?bat=NN&rssi=NN sent by the ESP32 in the calendar.bin
@@ -213,7 +347,7 @@ func statusFromQuery(r *http.Request) (int, int) {
 	return batPct, rssi
 }
 
-func (s *server) doRender(d displayData) (image.Image, error) {
+func (s *server) doRender(d displayData) image.Image {
 	if s.renderFn != nil {
 		return s.renderFn(d)
 	}
@@ -222,25 +356,36 @@ func (s *server) doRender(d displayData) (image.Image, error) {
 
 func (s *server) handleBin(w http.ResponseWriter, r *http.Request) {
 	bat, rssi := statusFromQuery(r)
-	events := s.snapshot()
-	data := buildDisplayData(events, s.loc, bat, rssi, time.Now().In(s.loc))
-	img, err := s.doRender(data)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
+	s.mu.Lock()
+	s.deviceSeenAt = time.Now()
+	s.deviceBat = bat
+	s.mu.Unlock()
+	img := s.doRender(s.liveDisplayData(bat, rssi))
 	if b := img.Bounds(); b.Dx() != imgW || b.Dy() != imgH {
 		log.Printf("pack: image %dx%d ≠ expected %dx%d", b.Dx(), b.Dy(), imgW, imgH)
 		http.Error(w, fmt.Sprintf("unexpected image size %dx%d", b.Dx(), b.Dy()), http.StatusInternalServerError)
 		return
 	}
 	packed := pack1Bit(img)
+	w.Header().Set("X-Sleep-Seconds", strconv.Itoa(sleepSeconds(time.Now().In(s.loc))))
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Length", strconv.Itoa(len(packed)))
 	if _, err := w.Write(packed); err != nil {
 		log.Printf("bin write: %v", err)
 	}
+}
+
+// sleepSeconds returns how long the ESP32 should sleep to wake at the next
+// :00/:30 mark in now's location, skipping a mark closer than wakeGuard.
+// Computing it here keeps the firmware free of NTP and timezone handling.
+func sleepSeconds(now time.Time) int {
+	pastHour := time.Duration(now.Minute())*time.Minute + time.Duration(now.Second())*time.Second
+	toMark := wakeMark - pastHour%wakeMark
+	if toMark < wakeGuard {
+		toMark += wakeMark
+	}
+	return int(toMark / time.Second)
 }
 
 func (s *server) handlePNG(w http.ResponseWriter, r *http.Request) {
@@ -251,13 +396,7 @@ func (s *server) handlePNG(w http.ResponseWriter, r *http.Request) {
 	if rssi == rssiUnknown {
 		rssi = demoDefaultRSSI
 	}
-	events := s.snapshot()
-	data := buildDisplayData(events, s.loc, bat, rssi, time.Now().In(s.loc))
-	img, err := s.doRender(data)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
+	img := s.doRender(s.liveDisplayData(bat, rssi))
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "image/png")
 	if err := writePNG(w, img); err != nil {
@@ -267,12 +406,7 @@ func (s *server) handlePNG(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) handleDemoPNG(w http.ResponseWriter, r *http.Request) {
 	events, now := demoEvents(s.loc)
-	data := buildDisplayData(events, s.loc, demoDefaultBatPct, demoDefaultRSSI, now)
-	img, err := s.doRender(data)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
+	img := s.doRender(buildDisplayData(events, s.loc, demoDefaultBatPct, demoDefaultRSSI, now))
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "image/png")
 	if err := writePNG(w, img); err != nil {
@@ -300,11 +434,36 @@ func demoEvents(loc *time.Location) ([]event, time.Time) {
 	}, now
 }
 
-func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {
+// handleHealth reports "ok" (200) while the cached events are fresh, and
+// "stale" (503) once no fetch has succeeded for staleAfterIntervals fetch
+// intervals, so monitoring notices a broken feed. The device_* lines describe
+// the ESP32's last check-in and don't affect the status.
+func (s *server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	s.mu.RLock()
-	age := time.Since(s.cachedAt)
+	fetchedAt := s.cachedAt
 	n := len(s.cached)
+	failures := s.consecutiveFailures
+	lastErr := ""
+	if s.lastErr != nil {
+		lastErr = s.lastErr.Error()
+	}
+	deviceSeenAt, deviceBat := s.deviceSeenAt, s.deviceBat
 	s.mu.RUnlock()
+
+	now := time.Now()
+	status, code := "ok", http.StatusOK
+	if s.isStale(fetchedAt, now) {
+		status, code = "stale", http.StatusServiceUnavailable
+	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	_, _ = fmt.Fprintf(w, "ok\nlast_fetch_age=%s\nevents=%d\n", age, n)
+	w.WriteHeader(code)
+	deviceAge, battery := "never", "unknown"
+	if !deviceSeenAt.IsZero() {
+		deviceAge = now.Sub(deviceSeenAt).Round(time.Second).String()
+	}
+	if deviceBat >= 0 {
+		battery = strconv.Itoa(deviceBat) + "%"
+	}
+	_, _ = fmt.Fprintf(w, "%s\nlast_fetch_age=%s\nevents=%d\nconsecutive_failures=%d\nlast_error=%s\ndevice_last_seen_age=%s\ndevice_battery=%s\n",
+		status, now.Sub(fetchedAt).Round(time.Second), n, failures, lastErr, deviceAge, battery)
 }

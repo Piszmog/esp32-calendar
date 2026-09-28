@@ -7,8 +7,14 @@ on:
     branches:
       - main
   workflow_dispatch:
+  # Release gates tagging on this whole workflow.
+  workflow_call:
+permissions:
+  contents: read
 concurrency:
-  group: ci-${{ github.ref }}
+  # github.workflow is the caller's name under workflow_call, so a release
+  # run doesn't cancel (or get cancelled by) a push run on the same ref.
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 jobs:
   lint:
@@ -23,7 +29,9 @@ jobs:
       - name: Lint
         uses: golangci/golangci-lint-action@v9
         with:
-          version: latest
+          # Pinned: with linters.default: all, a new release can add linters
+          # and fail CI with no code change. Dependabot doesn't bump this.
+          version: v2.13.2
           working-directory: server
   test:
     name: Test
@@ -33,10 +41,31 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: server/go.mod
-          cache: false
+          cache-dependency-path: server/go.sum
       - name: Test
-        run: go test ./...
+        run: go test -race ./...
         working-directory: server
+  vulncheck:
+    name: Vulncheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: golang/govulncheck-action@v1
+        with:
+          # Default 'stable' overrides go-version-file; scan the Go we ship.
+          go-version-input: ''
+          go-version-file: server/go.mod
+          cache-dependency-path: server/go.sum
+          work-dir: server
+  firmware-unit:
+    name: Firmware Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build and run host tests
+        run: |
+          c++ -std=c++17 -Wall -Wextra -Werror -I firmware/firebeetle_calendar \
+            firmware/test/logic_test.cpp -o logic_test
+          ./logic_test
   firmware:
     name: Firmware Build
     runs-on: ubuntu-latest
@@ -49,17 +78,26 @@ jobs:
           const char* WIFI_SSID   = "ssid";
           const char* WIFI_PASS   = "pass";
           const char* SERVER_HOST = "example.local";
+          #define STATIC_IP      192,168,1,50
+          #define STATIC_GATEWAY 192,168,1,1
+          #define STATIC_SUBNET  255,255,255,0
+          #define STATIC_DNS     192,168,1,1
           EOF
       - name: Compile sketch
         uses: arduino/compile-sketches@v1
         with:
           fqbn: esp32:esp32:dfrobot_firebeetle2_esp32e
+          # Pinned for the same reason as golangci-lint: a new core release
+          # could fail CI with no code change.
           platforms: |
             - name: esp32:esp32
+              version: 3.3.12
               source-url: https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
           libraries: |
             - name: GxEPD2
+              version: 1.6.9
             - name: Adafruit GFX Library
+              version: 1.12.6
           sketch-paths: |
             - firmware/firebeetle_calendar
   release-dryrun:

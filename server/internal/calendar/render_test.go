@@ -1,6 +1,7 @@
 package calendar_test
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -93,6 +94,10 @@ func TestChipTimeString(t *testing.T) {
 	}
 }
 
+// fitsRunes is a width-free fit check for summarizeDay table tests: a
+// summary fits when it is at most 60 runes.
+func fitsRunes(s string) bool { return len([]rune(s)) <= 60 }
+
 func TestSummarizeDay(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 5, 11, 0, 0, 0, 0, time.UTC)
@@ -183,15 +188,38 @@ func TestSummarizeDay(t *testing.T) {
 			},
 			"10 Abcdefghij · 11 Abcdefghij · 12 Abcdefghij", "+ 2 more events",
 		},
+		{
+			// All-day titles are shortened like timed ones, so a long one
+			// doesn't push the rest of the day into "+ N more".
+			"long all-day in multi",
+			[]calendar.Event{
+				{AllDay: true, Start: now, Title: strings.Repeat("x", 61)},
+				{Start: time.Date(2026, 5, 11, 10, 0, 0, 0, time.UTC), Title: "Review"},
+			},
+			strings.Repeat("x", 9) + "… · 10 Review", "",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			gotSummary, gotMore := calendar.SummarizeDay(tc.events)
+			gotSummary, gotMore := calendar.SummarizeDay(tc.events, fitsRunes)
 			assert.Equal(t, tc.wantSummary, gotSummary)
 			assert.Equal(t, tc.wantMore, gotMore)
 		})
 	}
+}
+
+// TestSummarizeDay_FirstPartOverflows verifies that when even the first part
+// is too wide it is kept (the renderer ellipsizes it) and the rest counted.
+func TestSummarizeDay_FirstPartOverflows(t *testing.T) {
+	t.Parallel()
+	events := []calendar.Event{
+		{Start: time.Date(2026, 5, 11, 9, 0, 0, 0, time.UTC), Title: "Plan"},
+		{Start: time.Date(2026, 5, 11, 10, 0, 0, 0, time.UTC), Title: "Plan"},
+	}
+	summary, more := calendar.SummarizeDay(events, func(string) bool { return false })
+	assert.Equal(t, "9 Plan", summary)
+	assert.Equal(t, "+ 1 more event", more)
 }
 
 func TestBuildDisplayData_PastEventCutoff(t *testing.T) {
@@ -216,6 +244,70 @@ func TestBuildDisplayData_PastEventCutoff(t *testing.T) {
 	assert.Contains(t, titles, "Recent")
 	assert.Contains(t, titles, testTitleHoliday)
 	assert.NotContains(t, titles, "Old")
+}
+
+func TestBuildDisplayData_OngoingEventStaysVisible(t *testing.T) {
+	t.Parallel()
+	loc := time.UTC
+	now := time.Date(2026, 5, 11, 12, 0, 0, 0, loc)
+
+	events := []calendar.Event{
+		// Started 2h ago, ends in 1h — still running, must stay in Today.
+		{Start: now.Add(-2 * time.Hour), End: now.Add(time.Hour), Title: "Workshop"},
+		// Started 2h ago, ended 5 min ago — over, must be hidden.
+		{Start: now.Add(-2 * time.Hour), End: now.Add(-5 * time.Minute), Title: "Finished"},
+	}
+
+	d := calendar.BuildDisplayData(events, loc, -1, 0, now)
+	require.Len(t, d.Today, 1)
+	assert.Equal(t, "Workshop", d.Today[0].Title)
+}
+
+func TestBuildDisplayData_OvernightTimedEvent(t *testing.T) {
+	t.Parallel()
+	loc := time.UTC
+	now := time.Date(2026, 5, 11, 12, 0, 0, 0, loc)
+
+	// Tomorrow 22:00 → day-after 02:00: shows in Tomorrow and on day 2.
+	overnight := calendar.Event{
+		Start: time.Date(2026, 5, 12, 22, 0, 0, 0, loc),
+		End:   time.Date(2026, 5, 13, 2, 0, 0, 0, loc),
+		Title: "Red-eye",
+	}
+
+	d := calendar.BuildDisplayData([]calendar.Event{overnight}, loc, -1, 0, now)
+	require.Len(t, d.Tomorrow, 1)
+	assert.Equal(t, "22:00", calendar.ChipTimeString(d.Tomorrow[0]), "start day keeps its start time")
+	assert.Contains(t, d.WeekAhead[0].Summary, "Red-eye", "continuation day must show the event")
+	assert.NotContains(t, d.WeekAhead[0].Summary, "22:00", "continuation day must not repeat the start time")
+	assert.Empty(t, d.WeekAhead[1].Summary)
+}
+
+func TestBuildDisplayData_MultiDayTimedEvent(t *testing.T) {
+	t.Parallel()
+	loc := time.UTC
+	now := time.Date(2026, 5, 11, 12, 0, 0, 0, loc)
+
+	// Yesterday 09:00 → tomorrow 17:00: today and tomorrow are continuation days.
+	trip := calendar.Event{
+		Start: time.Date(2026, 5, 10, 9, 0, 0, 0, loc),
+		End:   time.Date(2026, 5, 12, 17, 0, 0, 0, loc),
+		Title: "Trip",
+	}
+	// Ends exactly at midnight: must not leak onto the next day.
+	late := calendar.Event{
+		Start: time.Date(2026, 5, 13, 20, 0, 0, 0, loc),
+		End:   time.Date(2026, 5, 14, 0, 0, 0, 0, loc),
+		Title: "Late show",
+	}
+
+	d := calendar.BuildDisplayData([]calendar.Event{trip, late}, loc, -1, 0, now)
+	require.Len(t, d.Today, 1)
+	assert.Equal(t, "all-day", calendar.ChipTimeString(d.Today[0]))
+	require.Len(t, d.Tomorrow, 1)
+	assert.Equal(t, "all-day", calendar.ChipTimeString(d.Tomorrow[0]))
+	assert.Contains(t, d.WeekAhead[0].Summary, "Late show")
+	assert.Empty(t, d.WeekAhead[1].Summary, "event ending at midnight must not appear the next day")
 }
 
 func TestBuildDisplayData_DayBuckets(t *testing.T) {
@@ -269,6 +361,32 @@ func TestBuildDisplayData_WeekAheadSort(t *testing.T) {
 	assert.Equal(t, "9 Earlier · 15 Later", d.WeekAhead[1].Summary)
 }
 
+// TestBuildDisplayData_WeekAheadOverflowByWidth verifies that events which
+// don't fit the Week Ahead column's pixel width are counted in More instead of
+// being cut off by the renderer's ellipsis.
+func TestBuildDisplayData_WeekAheadOverflowByWidth(t *testing.T) {
+	t.Parallel()
+	loc := time.UTC
+	now := time.Date(2026, 5, 11, 12, 0, 0, 0, loc)
+
+	// Well under 60 runes joined, but much wider than the column.
+	titles := []string{"Standup", "Design crit", "1:1 Jamie", "Demo prep"}
+	events := make([]calendar.Event, 0, len(titles))
+	for i, title := range titles {
+		events = append(events, calendar.Event{Start: time.Date(2026, 5, 13, 9+2*i, 0, 0, 0, loc), Title: title})
+	}
+
+	d := calendar.BuildDisplayData(events, loc, -1, 0, now)
+	require.Len(t, d.WeekAhead, 5)
+	ds := d.WeekAhead[0]
+	assert.True(t, calendar.WeekSummaryFits(ds.Summary), "summary %q must fit the column", ds.Summary)
+	shown := strings.Count(ds.Summary, " · ") + 1
+	var hidden int
+	_, err := fmt.Sscanf(ds.More, "+ %d more", &hidden)
+	require.NoError(t, err, "More must report the dropped events, got %q", ds.More)
+	assert.Equal(t, len(events), shown+hidden)
+}
+
 func TestBuildDisplayData_BatteryAndWifi(t *testing.T) {
 	t.Parallel()
 	loc := time.UTC
@@ -288,8 +406,7 @@ func TestRenderImage_Dimensions(t *testing.T) {
 	loc := time.UTC
 	now := time.Date(2026, 5, 11, 12, 0, 0, 0, loc)
 	d := calendar.BuildDisplayData(nil, loc, 87, -55, now)
-	img, err := calendar.RenderImage(d)
-	require.NoError(t, err)
+	img := calendar.RenderImage(d)
 	b := img.Bounds()
 	assert.Equal(t, 800, b.Dx())
 	assert.Equal(t, 480, b.Dy())
@@ -353,62 +470,6 @@ func TestBuildDisplayData_NowField(t *testing.T) {
 	d := calendar.BuildDisplayData(nil, loc, -1, 0, now)
 	assert.True(t, d.Now.Equal(now.In(loc)))
 	assert.Equal(t, loc, d.Now.Location())
-}
-
-func TestDaysBetween(t *testing.T) {
-	t.Parallel()
-	la, err := time.LoadLocation("America/Los_Angeles")
-	require.NoError(t, err)
-
-	cases := []struct {
-		name string
-		a, b time.Time
-		want int
-	}{
-		{
-			"same day", time.Date(2026, 5, 11, 0, 0, 0, 0, time.UTC),
-			time.Date(2026, 5, 11, 23, 59, 0, 0, time.UTC), 0,
-		},
-		{
-			"tomorrow UTC", time.Date(2026, 5, 11, 0, 0, 0, 0, time.UTC),
-			time.Date(2026, 5, 12, 0, 0, 0, 0, time.UTC), 1,
-		},
-		{
-			"yesterday UTC", time.Date(2026, 5, 12, 0, 0, 0, 0, time.UTC),
-			time.Date(2026, 5, 11, 0, 0, 0, 0, time.UTC), -1,
-		},
-		{
-			"one week", time.Date(2026, 5, 11, 0, 0, 0, 0, time.UTC),
-			time.Date(2026, 5, 18, 0, 0, 0, 0, time.UTC), 7,
-		},
-		// Spring-forward: 2026-03-08 02:00 PST → 03:00 PDT in America/Los_Angeles.
-		// Midnights are 23h apart; int(23/24)=0 with the old Hours/24 formula.
-		{
-			"spring-forward day → tomorrow",
-			time.Date(2026, 3, 8, 0, 0, 0, 0, la),
-			time.Date(2026, 3, 9, 0, 0, 0, 0, la),
-			1,
-		},
-		// Fall-back: 2026-11-01 02:00 PDT → 01:00 PST. Midnights are 25h apart.
-		{
-			"fall-back day → tomorrow",
-			time.Date(2026, 11, 1, 0, 0, 0, 0, la),
-			time.Date(2026, 11, 2, 0, 0, 0, 0, la),
-			1,
-		},
-		{
-			"cross-DST week",
-			time.Date(2026, 3, 8, 0, 0, 0, 0, la),
-			time.Date(2026, 3, 15, 0, 0, 0, 0, la),
-			7,
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			assert.Equal(t, tc.want, calendar.DaysBetween(tc.a, tc.b))
-		})
-	}
 }
 
 func TestBuildDisplayData_DST(t *testing.T) {
@@ -484,4 +545,103 @@ func TestBuildDisplayData_AllDayWeekAheadSpan(t *testing.T) {
 	for i, ds := range d.WeekAhead {
 		assert.Contains(t, ds.Summary, "Week Sprint", "WeekAhead[%d] (%s) should show the ongoing all-day event", i, ds.Date.Format("Mon"))
 	}
+}
+
+func TestLeftColumnRows(t *testing.T) {
+	t.Parallel()
+	// 7 rows: the last Tomorrow row ends at y=436, above the footer at 448.
+	assert.Equal(t, 7, calendar.LeftColumnRows())
+}
+
+func TestSplitLeftRows(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name                    string
+		nToday, nTomorrow       int
+		wantToday, wantTomorrow int
+	}{
+		{"both empty", 0, 0, 1, 6},
+		{"few events", 2, 1, 2, 5},
+		{"today overflows, tomorrow empty", 10, 0, 6, 1},
+		{"today overflows, tomorrow one", 10, 1, 6, 1},
+		{"today overflows, tomorrow many", 10, 5, 5, 2},
+		{"tomorrow overflows", 1, 10, 1, 6},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			today, tomorrow := calendar.SplitLeftRows(tc.nToday, tc.nTomorrow)
+			assert.Equal(t, tc.wantToday, today, "today rows")
+			assert.Equal(t, tc.wantTomorrow, tomorrow, "tomorrow rows")
+			assert.Equal(t, calendar.LeftColumnRows(), today+tomorrow)
+		})
+	}
+}
+
+func TestVisibleChips(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name                  string
+		n, rows               int
+		wantShown, wantHidden int
+	}{
+		{"none", 0, 3, 0, 0},
+		{"fits exactly", 3, 3, 3, 0},
+		{"one over", 4, 3, 2, 2},
+		{"many over", 10, 5, 4, 6},
+		{"single row", 2, 1, 0, 2},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			shown, hidden := calendar.VisibleChips(tc.n, tc.rows)
+			assert.Equal(t, tc.wantShown, shown, "shown")
+			assert.Equal(t, tc.wantHidden, hidden, "hidden")
+		})
+	}
+}
+
+// TestRenderImage_BusyDayStaysAboveFooter renders more events than fit and
+// checks the strip just above the footer line is blank in the left column.
+func TestRenderImage_BusyDayStaysAboveFooter(t *testing.T) {
+	t.Parallel()
+	loc := time.UTC
+	now := time.Date(2026, 5, 11, 8, 0, 0, 0, loc)
+	events := make([]calendar.Event, 0, 15)
+	for i := range 10 {
+		events = append(events, calendar.Event{Start: now.Add(time.Duration(i+1) * time.Hour), Title: "Today event"})
+	}
+	for i := range 5 {
+		events = append(events, calendar.Event{Start: time.Date(2026, 5, 12, 9+i, 0, 0, 0, loc), Title: testTitleTomorrow})
+	}
+	d := calendar.BuildDisplayData(events, loc, -1, 0, now)
+	require.Len(t, d.Today, 10)
+	require.Len(t, d.Tomorrow, 5)
+
+	img := calendar.RenderImage(d)
+	for y := 438; y <= 446; y++ {
+		for x := 20; x <= 420; x++ {
+			r, g, b, _ := img.At(x, y).RGBA()
+			require.Greater(t, (r+g+b)/3, uint32(32768), "pixel (%d,%d) above footer should be white", x, y)
+		}
+	}
+}
+
+func TestRenderImage_FooterShowsFetchTimeAndStale(t *testing.T) {
+	t.Parallel()
+	loc := time.UTC
+	now := time.Date(2026, 5, 11, 12, 0, 0, 0, loc)
+	base := calendar.BuildDisplayData(nil, loc, -1, 0, now)
+	fresh := calendar.RenderImage(base)
+
+	fetched := base
+	fetched.FetchedAt = now.Add(-2 * time.Hour)
+	older := calendar.RenderImage(fetched)
+
+	stale := fetched
+	stale.Stale = true
+	staleImg := calendar.RenderImage(stale)
+
+	assert.NotEqual(t, calendar.Pack1Bit(fresh), calendar.Pack1Bit(older), "footer should show fetch time, not render time")
+	assert.NotEqual(t, calendar.Pack1Bit(older), calendar.Pack1Bit(staleImg), "stale flag should change the footer")
 }

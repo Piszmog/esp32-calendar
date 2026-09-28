@@ -29,13 +29,31 @@ func BuildDisplayData(events []Event, loc *time.Location, batPct, rssi int, now 
 }
 
 // SummarizeDay wraps summarizeDay for blackbox tests.
-func SummarizeDay(events []Event) (string, string) { return summarizeDay(events) }
+func SummarizeDay(events []Event, fits func(string) bool) (string, string) {
+	return summarizeDay(events, fits)
+}
+
+// WeekSummaryFits wraps weekSummaryFits for blackbox tests.
+func WeekSummaryFits(s string) bool { return weekSummaryFits(s) }
 
 // RSSIToBars wraps rssiToBars for blackbox tests.
 func RSSIToBars(rssi int) int { return rssiToBars(rssi) }
 
 // RenderImage wraps renderImage for blackbox tests.
-func RenderImage(d DisplayData) (image.Image, error) { return renderImage(d) }
+func RenderImage(d DisplayData) image.Image { return renderImage(d) }
+
+// SplitLeftRows wraps splitLeftRows for blackbox tests.
+func SplitLeftRows(nToday, nTomorrow int) (int, int) { return splitLeftRows(nToday, nTomorrow) }
+
+// VisibleChips wraps visibleChips for blackbox tests.
+func VisibleChips(n, rows int) (int, int) { return visibleChips(n, rows) }
+
+// LeftColumnRows wraps leftColumnRows for blackbox tests.
+func LeftColumnRows() int { return leftColumnRows() }
+
+// TestFetchInterval is the fetch interval the test handlers use, so tests
+// can place cachedAt either side of the staleness threshold.
+const TestFetchInterval = 10 * time.Minute
 
 // StatusFromQuery wraps statusFromQuery for blackbox tests.
 func StatusFromQuery(r *http.Request) (int, int) { return statusFromQuery(r) }
@@ -46,32 +64,25 @@ func ChipTimeString(ev Event) string { return chipTimeString(ev) }
 // Truncate wraps truncate for blackbox tests.
 func Truncate(s string, n int) string { return truncate(s, n) }
 
-// DaysBetween wraps daysBetween for blackbox tests.
-func DaysBetween(a, b time.Time) int { return daysBetween(a, b) }
-
 // FetchEventsIcal wraps fetchEventsIcal for blackbox tests.
 func FetchEventsIcal(ctx context.Context, url string, loc *time.Location) ([]Event, error) {
 	return fetchEventsIcal(ctx, url, loc)
 }
 
 // NewTestHandler returns the HTTP handler that Run installs, pre-loaded with
-// the given events, without starting a listener, refresh loop, or Google
-// Calendar fetch. Suitable for use with httptest.NewServer in handler tests.
+// the given events, without starting a listener, refresh loop, or iCal
+// fetch. Suitable for use with httptest.NewServer in handler tests.
 func NewTestHandler(loc *time.Location, events []Event, fetchedAt time.Time) http.Handler {
 	s := &server{
-		cfg:      Config{},
-		loc:      loc,
-		mu:       sync.RWMutex{},
-		cached:   events,
-		cachedAt: fetchedAt,
-		renderFn: nil,
+		cfg:       Config{FetchInterval: TestFetchInterval},
+		loc:       loc,
+		mu:        sync.RWMutex{},
+		cached:    events,
+		cachedAt:  fetchedAt,
+		renderFn:  nil,
+		deviceBat: -1,
 	}
-	mux := http.NewServeMux()
-	mux.HandleFunc("/calendar.bin", s.handleBin)
-	mux.HandleFunc("/calendar.png", s.handlePNG)
-	mux.HandleFunc("/calendar.demo.png", s.handleDemoPNG)
-	mux.HandleFunc("/healthz", s.handleHealth)
-	return mux
+	return s.Handler()
 }
 
 // NewTestHandlerWithRenderer is like NewTestHandler but uses a custom render
@@ -80,22 +91,18 @@ func NewTestHandlerWithRenderer(
 	loc *time.Location,
 	events []Event,
 	fetchedAt time.Time,
-	renderFn func(DisplayData) (image.Image, error),
+	renderFn func(DisplayData) image.Image,
 ) http.Handler {
 	s := &server{
-		cfg:      Config{},
-		loc:      loc,
-		mu:       sync.RWMutex{},
-		cached:   events,
-		cachedAt: fetchedAt,
-		renderFn: renderFn,
+		cfg:       Config{FetchInterval: TestFetchInterval},
+		loc:       loc,
+		mu:        sync.RWMutex{},
+		cached:    events,
+		cachedAt:  fetchedAt,
+		renderFn:  renderFn,
+		deviceBat: -1,
 	}
-	mux := http.NewServeMux()
-	mux.HandleFunc("/calendar.bin", s.handleBin)
-	mux.HandleFunc("/calendar.png", s.handlePNG)
-	mux.HandleFunc("/calendar.demo.png", s.handleDemoPNG)
-	mux.HandleFunc("/healthz", s.handleHealth)
-	return mux
+	return s.Handler()
 }
 
 // Server is the internal server type exposed to blackbox tests.
@@ -105,12 +112,13 @@ type Server = server
 // calling Refresh or SetCached in tests.
 func NewTestServer(cfg Config, loc *time.Location) *Server {
 	return &server{
-		cfg:      cfg,
-		loc:      loc,
-		mu:       sync.RWMutex{},
-		cached:   nil,
-		cachedAt: time.Time{},
-		renderFn: nil,
+		cfg:       cfg,
+		loc:       loc,
+		mu:        sync.RWMutex{},
+		cached:    nil,
+		cachedAt:  time.Time{},
+		renderFn:  nil,
+		deviceBat: -1,
 	}
 }
 
@@ -128,8 +136,20 @@ func (s *Server) Refresh(ctx context.Context) error { return s.refresh(ctx) }
 
 // Cached returns a copy of the currently cached events.
 func (s *Server) Cached() []Event {
-	return s.snapshot()
+	events, _ := s.snapshot()
+	return events
 }
+
+// RefreshLoop runs the internal refresh loop until ctx is cancelled.
+func (s *Server) RefreshLoop(ctx context.Context) { s.refreshLoop(ctx) }
+
+// GracefulShutdown wraps gracefulShutdown for blackbox tests.
+func GracefulShutdown(srv *http.Server, cancel context.CancelFunc, loopDone *sync.WaitGroup, serveErr <-chan error) error {
+	return gracefulShutdown(srv, cancel, loopDone, serveErr)
+}
+
+// Handler returns the same routes Run installs, backed by s.
+func (s *Server) Handler() http.Handler { return s.routes() }
 
 // EventsFromICS parses an iCal string and returns events in [timeMin, timeMax],
 // expanding recurring events. Provides a deterministic test entry point for
@@ -141,3 +161,20 @@ func EventsFromICS(body string, loc *time.Location, timeMin, timeMax time.Time) 
 	}
 	return eventsFromCal(cal, loc, timeMin, timeMax), nil
 }
+
+// RequestLogLine wraps requestLogLine for blackbox tests.
+func RequestLogLine(r *http.Request, status int, d time.Duration) string {
+	return requestLogLine(r, status, d)
+}
+
+// ParseIcalDuration wraps parseIcalDuration for blackbox tests.
+func ParseIcalDuration(s string) (int, time.Duration, bool) { return parseIcalDuration(s) }
+
+// SleepSeconds wraps sleepSeconds for blackbox tests.
+func SleepSeconds(now time.Time) int { return sleepSeconds(now) }
+
+// ImgW and ImgH expose the bitmap dimensions for the firmware contract test.
+const (
+	ImgW = imgW
+	ImgH = imgH
+)

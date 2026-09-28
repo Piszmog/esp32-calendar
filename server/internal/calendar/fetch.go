@@ -1,9 +1,6 @@
 package calendar
 
-import (
-	"context"
-	"time"
-)
+import "time"
 
 const fetchTimeout = 30 * time.Second
 
@@ -14,9 +11,4 @@ type event struct {
 	End    time.Time
 	Title  string
 	AllDay bool
-}
-
-// fetchEvents returns events from now-1h to now+8d via the configured iCal feed.
-func fetchEvents(ctx context.Context, c Config, loc *time.Location) ([]event, error) {
-	return fetchEventsIcal(ctx, c.ICalURL, loc)
 }

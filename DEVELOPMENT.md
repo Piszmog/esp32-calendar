@@ -11,17 +11,21 @@ esp32-calendar/
 │   ├── cmd/server/main.go      Flags, entrypoint
 │   └── internal/calendar/      The only package
 │       ├── server.go           Config, Run, HTTP handlers, refresh loop
-│       ├── fetch.go            event type, fetchEvents dispatcher
+│       ├── fetch.go            event type, fetchTimeout
 │       ├── fetch_ical.go       iCal HTTP fetch, parse, and event filtering
 │       ├── render.go           buildDisplayData, renderImage, DejaVu font embedding
 │       ├── icons.go            WiFi bar and battery icon drawing
 │       ├── pack.go             pack1Bit: RGBA → 1-bit MSB-first 48000-byte buffer
 │       └── fonts/              Embedded TTFs (DejaVu Sans regular + bold)
 ├── firmware/
-│   └── firebeetle_calendar/
-│       └── firebeetle_calendar.ino   ESP32 sketch
+│   ├── firebeetle_calendar/
+│   │   ├── firebeetle_calendar.ino   ESP32 sketch
+│   │   └── calendar_logic.h          Pure wake-cycle logic (no Arduino headers)
+│   └── test/
+│       └── logic_test.cpp            Host unit tests for calendar_logic.h
 ├── deploy/
-│   └── calendar.service        systemd unit for the Pi
+│   ├── calendar.service        systemd unit for the Pi
+│   └── calendar.env.example    EnvironmentFile template (ICAL_URL, AUTH_TOKEN)
 ├── .goreleaser.yaml            Cross-compiled release config
 └── CLAUDE.md                   Agent-side invariants (source of truth for Claude)
 ```
@@ -94,33 +98,11 @@ file to `package calendar` — keep the blackbox boundary intact. Tests use
 
 ## Non-obvious invariants
 
-**Bitmap size is a hard protocol contract.** `800×480 / 8 = 48000 bytes`. If you
-change `imgW`/`imgH` in `render.go`, you must also update `IMG_W`/`IMG_H` in
-`firmware/firebeetle_calendar/firebeetle_calendar.ino` and reflash. There is no
-version handshake — a size mismatch causes the ESP32 to silently skip the refresh.
-
-**Pack convention is paired.** `pack1Bit` writes MSB-first, bit=1=white. The
-firmware reads with `drawInvertedBitmap(..., GxEPD_BLACK)`, which paints black
-where the bit is 0. If either side changes this convention, the image inverts.
-
-**Font `init()` panics on bad embed.** `render.go`'s `init()` calls
-`truetype.Parse` on the embedded TTFs and panics on failure. Don't remove the
-embedded font files under `internal/calendar/fonts/`.
-
-**Past-event cutoff.** Events starting more than 30 minutes ago are hidden. The
-constant is `now.Add(-30 * time.Minute)` in `render.go:buildDisplayData`.
-
-**Startup is fail-fast.** `Run` validates the timezone and performs an initial
-synchronous calendar fetch; a misconfiguration fails immediately rather than
-serving a stale image.
-
-**HTTP endpoints are unauthenticated.** The default `-listen :8080` binds to all
-interfaces — anyone on the LAN can fetch `/calendar.bin` (which contains event
-titles) or the PNG preview. Bind to `127.0.0.1:8080` and front with a reverse
-proxy if this is a concern.
-
-**Export surface is intentionally minimal.** `Config`, `Run` is the full public
-API. Don't add exports unless `cmd/server` genuinely needs them.
+The protocol contracts, event-visibility rules, staleness, auth, wake
+schedule, and font-cache invariants are kept in one place:
+[CLAUDE.md → Non-obvious invariants](CLAUDE.md#non-obvious-invariants). Read
+that section before changing `render.go`, `fetch_ical.go`, `server.go`, or the
+firmware.
 
 ## Cutting a release
 
@@ -144,12 +126,17 @@ GITHUB_TOKEN=ghp_... goreleaser release --clean    # from repo root
 ## Linter notes
 
 `server/.golangci.yml` runs with `default: all` — every linter is on unless
-explicitly disabled.
+explicitly disabled. CI pins the golangci-lint version (in `ci.yml` and
+`release.yml`); Dependabot doesn't bump it, so update both by hand. The same
+goes for the GxEPD2 / Adafruit GFX versions in the firmware CI job.
 
-- **`exhaustruct`** — struct literals must fill all fields. Exceptions:
-  `net/http.Cookie`, `net/http.Server`, `log/slog.HandlerOptions`.
+- **`exhaustruct`** is disabled (third-party struct literals caused too much
+  churn).
 - **`tagliatelle`** — requires snake_case JSON tags.
-- **`_test.go` files** relax `funlen`, `maintidx`, `exhaustruct`, and `err113`.
+- **`_test.go` files** relax `funlen`, `maintidx`, `err113`, `gosmopolitan`,
+  `gochecknoglobals`, and a few `gosec` rules (G101, G117, G306, G703).
+- The config lists the few non-test exclusions; each has a comment or an
+  obvious scope. Don't add `//nolint` comments.
 
 ## Coordinated protocol changes
 
@@ -161,6 +148,11 @@ Some constants in the `.ino` are a hard contract with the server:
   `drawInvertedBitmap(..., GxEPD_BLACK)`. Flipping either side inverts the image.
 - **Query params:** the ESP32 sends `?bat=NN&rssi=NN`; the server renders these
   into the status bar. Renaming a param requires changes on both sides.
+- **Headers:** the server sends `X-Sleep-Seconds` (the firmware's next sleep);
+  the firmware sends `Authorization: Bearer <AUTH_TOKEN>` when configured.
+
+`internal/calendar/protocol_test.go` reads the `.ino` and fails if any of these
+drift apart.
 
 When a change touches any of the above, deploy in this order:
 

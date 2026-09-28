@@ -8,4 +8,5 @@ const (
 	testTitleLater      = "Later"
 	testTitleEarlier    = "Earlier"
 	testTimezoneUTC     = "UTC"
+	testPathBin         = "/calendar.bin"
 )

@@ -1,6 +1,7 @@
 package calendar_test
 
 import (
+	"bytes"
 	"context"
 	"net/http"
 	"net/http/httptest"
@@ -244,7 +245,7 @@ RRULE:FREQ=WEEKLY;COUNT=8
 END:VEVENT
 END:VCALENDAR`
 
-	tMin := anchor                    // 2026-06-01
+	tMin := anchor                   // 2026-06-01
 	tMax := anchor.AddDate(0, 0, 14) // 2026-06-15
 	events := eventsFromICS(t, body, tMin, tMax)
 
@@ -387,6 +388,48 @@ END:VCALENDAR`
 	assert.True(t, found, "rescheduled June 8 2pm override must appear")
 }
 
+// TestEventsFromCal_SkipsCancelled verifies that STATUS:CANCELLED events are
+// dropped, including a cancelled override of one recurring instance (whose
+// base slot must stay suppressed).
+func TestEventsFromCal_SkipsCancelled(t *testing.T) {
+	t.Parallel()
+
+	body := `BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+UID:cancelled-single@test
+SUMMARY:Called off
+STATUS:CANCELLED
+DTSTART:20260602T100000Z
+DTEND:20260602T110000Z
+END:VEVENT
+BEGIN:VEVENT
+UID:standup-cancel@test
+SUMMARY:Weekly standup
+DTSTART:20260601T100000Z
+DTEND:20260601T103000Z
+RRULE:FREQ=WEEKLY;COUNT=3
+END:VEVENT
+BEGIN:VEVENT
+UID:standup-cancel@test
+SUMMARY:Weekly standup
+STATUS:cancelled
+DTSTART:20260608T100000Z
+DTEND:20260608T103000Z
+RECURRENCE-ID:20260608T100000Z
+END:VEVENT
+END:VCALENDAR`
+
+	events := eventsFromICS(t, body, anchor, anchor.AddDate(0, 0, 21))
+
+	assert.NotContains(t, eventTitles(events), "Called off")
+	require.Len(t, events, 2, "only June 1 and June 15 standups should remain")
+	cancelled := time.Date(2026, 6, 8, 10, 0, 0, 0, time.UTC)
+	for _, e := range events {
+		assert.False(t, e.Start.UTC().Equal(cancelled), "cancelled June 8 instance must not appear")
+	}
+}
+
 // TestExpandRecurring_RRuleParseErrorFallback verifies that a malformed RRULE
 // falls back to the single DTSTART occurrence instead of silently dropping the event.
 func TestExpandRecurring_RRuleParseErrorFallback(t *testing.T) {
@@ -410,4 +453,465 @@ END:VCALENDAR`
 
 	count := countTitle(events, "Event with bad RRULE")
 	assert.Equal(t, 1, count, "malformed RRULE must fall back to DTSTART occurrence, not silently drop the event")
+}
+
+// TestExpandRecurring_AllDayAcrossDST verifies that recurring all-day
+// occurrences keep whole-day spans when the base event or an occurrence falls
+// on a 23h or 25h DST day.
+func TestExpandRecurring_AllDayAcrossDST(t *testing.T) {
+	t.Parallel()
+	loc, err := time.LoadLocation("America/Denver")
+	require.NoError(t, err)
+
+	cases := []struct {
+		name    string
+		dtstart string
+		rrule   string
+		from    time.Time
+	}{
+		// Base day is 2026-03-08, a 23h spring-forward day; 2027-03-08 is not.
+		{"base on spring-forward", "20260308", "FREQ=YEARLY", time.Date(2027, 3, 7, 0, 0, 0, 0, loc)},
+		// Base day is a normal 24h day; the 2026-11-01 occurrence is 25h.
+		{"occurrence on fall-back", "20261025", "FREQ=WEEKLY;COUNT=3", time.Date(2026, 10, 31, 0, 0, 0, 0, loc)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			start, err := time.ParseInLocation("20060102", tc.dtstart, loc)
+			require.NoError(t, err)
+			body := "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nUID:dst@test\nSUMMARY:Birthday\n" +
+				"DTSTART;VALUE=DATE:" + tc.dtstart + "\n" +
+				"DTEND;VALUE=DATE:" + start.AddDate(0, 0, 1).Format("20060102") + "\n" +
+				"RRULE:" + tc.rrule + "\nEND:VEVENT\nEND:VCALENDAR"
+			events, err := calendar.EventsFromICS(body, loc, tc.from, tc.from.AddDate(0, 0, 3))
+			require.NoError(t, err)
+			require.Len(t, events, 1)
+			ev := events[0]
+			assert.Equal(t, ev.Start.AddDate(0, 0, 1), ev.End, "all-day occurrence must end at the next midnight")
+
+			d := calendar.BuildDisplayData(events, loc, -1, 0, ev.Start.Add(12*time.Hour))
+			assert.Len(t, d.Today, 1, "all-day occurrence must show on its day")
+		})
+	}
+}
+
+// TestExpandRecurring_AllDayWidenedTailDropped covers the one way an
+// occurrence from the widened query ends before timeMin: the base event's
+// duration is 25h (a fall-back day) but a later occurrence lasts one 24h day.
+func TestExpandRecurring_AllDayWidenedTailDropped(t *testing.T) {
+	t.Parallel()
+	loc, err := time.LoadLocation("America/New_York")
+	require.NoError(t, err)
+	// 2026-11-01 is the fall-back day, so the base event is 25h long.
+	body := "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nUID:tail@test\nSUMMARY:Daily\n" +
+		"DTSTART;VALUE=DATE:20261101\nDTEND;VALUE=DATE:20261102\n" +
+		"RRULE:FREQ=DAILY\nEND:VEVENT\nEND:VCALENDAR"
+	// The widened query reaches back to Nov 8 23:30 and picks up the Nov 9
+	// occurrence, which ended at midnight, before timeMin.
+	timeMin := time.Date(2026, 11, 10, 0, 30, 0, 0, loc)
+	events, err := calendar.EventsFromICS(body, loc, timeMin, timeMin.AddDate(0, 0, 1))
+	require.NoError(t, err)
+	require.Len(t, events, 2)
+	assert.Equal(t, time.Date(2026, 11, 10, 0, 0, 0, 0, loc), events[0].Start, "Nov 9 ended before timeMin and must be dropped")
+	assert.Equal(t, time.Date(2026, 11, 11, 0, 0, 0, 0, loc), events[1].Start)
+}
+
+// TestExpandRecurring_NoEndTime verifies that a recurring timed event with
+// neither DTEND nor DURATION expands to zero-length instances.
+func TestExpandRecurring_NoEndTime(t *testing.T) {
+	t.Parallel()
+	body := "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nUID:noend@test\nSUMMARY:Reminder\n" +
+		"DTSTART:20260601T090000Z\nRRULE:FREQ=DAILY;COUNT=5\nEND:VEVENT\nEND:VCALENDAR"
+	// The window starts at the second occurrence exactly: a zero-length
+	// instance at timeMin is still in the window.
+	events := eventsFromICS(t, body, anchor.Add(33*time.Hour), anchor.AddDate(0, 0, 10))
+	require.Len(t, events, 4)
+	for _, ev := range events {
+		assert.True(t, ev.End.IsZero(), "occurrence at %v should have no end", ev.Start)
+	}
+	assert.Equal(t, anchor.Add(33*time.Hour), events[0].Start)
+}
+
+func TestFetchEventsIcal_SendsUserAgent(t *testing.T) {
+	t.Parallel()
+
+	gotUA := make(chan string, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUA <- r.UserAgent()
+		_, _ = w.Write([]byte(icsFixture))
+	}))
+	t.Cleanup(srv.Close)
+
+	_, err := calendar.FetchEventsIcal(t.Context(), srv.URL, time.UTC)
+	require.NoError(t, err)
+	assert.Equal(t, "calendar-display", <-gotUA)
+}
+
+func TestFetchEventsIcal_TooLarge(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(bytes.Repeat([]byte("x"), 10<<20+1))
+	}))
+	t.Cleanup(srv.Close)
+
+	_, err := calendar.FetchEventsIcal(t.Context(), srv.URL, time.UTC)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "exceeds size limit")
+}
+
+// TestFetchEventsIcal_NotICal covers a 200 whose body isn't iCal, e.g. an
+// HTML login page served for a revoked secret URL.
+func TestFetchEventsIcal_NotICal(t *testing.T) {
+	t.Parallel()
+	srv := icalServer(t, "<!DOCTYPE html><html><body>Sign in</body></html>")
+	t.Cleanup(srv.Close)
+
+	_, err := calendar.FetchEventsIcal(t.Context(), srv.URL, time.UTC)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "parse ical")
+}
+
+func TestFetchEventsIcal_ErrorOmitsURL(t *testing.T) {
+	t.Parallel()
+
+	// A closed server gives a dial error, which net/http wraps with the URL.
+	srv := httptest.NewServer(http.NotFoundHandler())
+	srv.Close()
+
+	_, err := calendar.FetchEventsIcal(t.Context(), srv.URL+"/private-secret-token/basic.ics", time.UTC)
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "secret-token")
+}
+
+// notLocal returns a fixed zone five hours ahead of time.Local, so floating
+// iCal times parsed in time.Local land on the wrong instant unless they are
+// re-anchored to the configured zone.
+func notLocal() *time.Location {
+	_, off := time.Now().Zone()
+	return time.FixedZone("not-local", off+5*60*60)
+}
+
+// TestExpandRecurring_FloatingExclusionsUseConfiguredZone verifies that
+// floating and all-day EXDATE / RECURRENCE-ID values are matched in the
+// configured zone, not the host's time.Local.
+func TestExpandRecurring_FloatingExclusionsUseConfiguredZone(t *testing.T) {
+	t.Parallel()
+	loc := notLocal()
+	from := time.Date(2026, 6, 1, 0, 0, 0, 0, loc)
+
+	allDay := `BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+UID:allday-exdate@test
+SUMMARY:Gym
+DTSTART;VALUE=DATE:20260601
+DTEND;VALUE=DATE:20260602
+RRULE:FREQ=WEEKLY;COUNT=3
+EXDATE;VALUE=DATE:20260608
+END:VEVENT
+END:VCALENDAR`
+	events, err := calendar.EventsFromICS(allDay, loc, from, from.AddDate(0, 0, 21))
+	require.NoError(t, err)
+	assert.Equal(t, 2, countTitle(events, "Gym"), "all-day EXDATE must exclude 2026-06-08")
+
+	floating := `BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+UID:floating@test
+SUMMARY:Sync
+DTSTART:20260601T100000
+DTEND:20260601T103000
+RRULE:FREQ=WEEKLY;COUNT=3
+END:VEVENT
+BEGIN:VEVENT
+UID:floating@test
+RECURRENCE-ID:20260608T100000
+SUMMARY:Sync moved
+DTSTART:20260608T140000
+DTEND:20260608T143000
+END:VEVENT
+END:VCALENDAR`
+	events, err = calendar.EventsFromICS(floating, loc, from, from.AddDate(0, 0, 21))
+	require.NoError(t, err)
+	assert.Equal(t, 2, countTitle(events, "Sync"), "floating RECURRENCE-ID must suppress the base slot")
+	assert.Equal(t, 1, countTitle(events, "Sync moved"))
+}
+
+// TestExpandRecurring_ExpandsInEventZone verifies that a series defined in
+// another zone keeps its own wall-clock time when the two zones change DST on
+// different dates.
+func TestExpandRecurring_ExpandsInEventZone(t *testing.T) {
+	t.Parallel()
+	denver, err := time.LoadLocation("America/Denver")
+	require.NoError(t, err)
+	london, err := time.LoadLocation("Europe/London")
+	require.NoError(t, err)
+
+	// Weekly 09:00 London from 2026-02-02. The US springs forward on
+	// 2026-03-08, the UK on 2026-03-29; 2026-03-16 falls in between.
+	body := `BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+UID:london@test
+SUMMARY:London call
+DTSTART;TZID=Europe/London:20260202T090000
+DTEND;TZID=Europe/London:20260202T093000
+RRULE:FREQ=WEEKLY
+END:VEVENT
+END:VCALENDAR`
+	from := time.Date(2026, 3, 15, 0, 0, 0, 0, denver)
+	events, err := calendar.EventsFromICS(body, denver, from, from.AddDate(0, 0, 3))
+	require.NoError(t, err)
+	require.Len(t, events, 1)
+	ev := events[0]
+	assert.Equal(t, 9, ev.Start.In(london).Hour(), "occurrence must stay at 09:00 London")
+	assert.Equal(t, denver, ev.Start.Location(), "events are normalized to the configured zone")
+}
+
+func TestParseIcalDuration(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		in    string
+		days  int
+		clock time.Duration
+		ok    bool
+	}{
+		{"P1W", 7, 0, true},
+		{"P3D", 3, 0, true},
+		{"PT1H30M", 0, 90 * time.Minute, true},
+		{"P1DT2H", 1, 2 * time.Hour, true},
+		{"+PT45S", 0, 45 * time.Second, true},
+		{"-PT15M", 0, -15 * time.Minute, true},
+		{"", 0, 0, false},
+		{"P", 0, 0, false},
+		{"PT", 0, 0, false},
+		{"1H", 0, 0, false},
+		{"P1WT1H", 0, 0, false},
+	}
+	for _, tc := range tests {
+		days, clock, ok := calendar.ParseIcalDuration(tc.in)
+		assert.Equal(t, tc.ok, ok, "ok for %q", tc.in)
+		assert.Equal(t, tc.days, days, "days for %q", tc.in)
+		assert.Equal(t, tc.clock, clock, "clock for %q", tc.in)
+	}
+}
+
+// TestEventsFromCal_Duration verifies DTSTART+DURATION events get an End, so
+// they stay visible while running and span the days they cover.
+func TestEventsFromCal_Duration(t *testing.T) {
+	t.Parallel()
+
+	body := `BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+UID:timed-dur@test
+SUMMARY:Timed duration
+DTSTART:20260602T100000Z
+DURATION:PT1H30M
+END:VEVENT
+BEGIN:VEVENT
+UID:allday-dur@test
+SUMMARY:All-day duration
+DTSTART;VALUE=DATE:20260603
+DURATION:P3D
+END:VEVENT
+BEGIN:VEVENT
+UID:weekly-dur@test
+SUMMARY:Weekly duration
+DTSTART:20260601T090000Z
+DURATION:PT45M
+RRULE:FREQ=WEEKLY;COUNT=2
+END:VEVENT
+END:VCALENDAR`
+	events := eventsFromICS(t, body, anchor, anchor.AddDate(0, 0, 30))
+
+	require.Equal(t, 1, countTitle(events, "Timed duration"))
+	require.Equal(t, 1, countTitle(events, "All-day duration"))
+	require.Equal(t, 2, countTitle(events, "Weekly duration"))
+	for _, e := range events {
+		switch e.Title {
+		case "Timed duration":
+			assert.Equal(t, 90*time.Minute, e.End.Sub(e.Start))
+		case "All-day duration":
+			assert.True(t, e.AllDay)
+			assert.Equal(t, time.Date(2026, 6, 6, 0, 0, 0, 0, time.UTC), e.End)
+		case "Weekly duration":
+			assert.Equal(t, 45*time.Minute, e.End.Sub(e.Start))
+		}
+	}
+}
+
+// TestEventsFromCal_DTEndWinsOverDuration verifies DTEND is used when both
+// are present (invalid per RFC 5545, but seen in the wild).
+func TestEventsFromCal_DTEndWinsOverDuration(t *testing.T) {
+	t.Parallel()
+
+	body := `BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+UID:both@test
+SUMMARY:Both
+DTSTART:20260602T100000Z
+DTEND:20260602T110000Z
+DURATION:PT3H
+END:VEVENT
+END:VCALENDAR`
+	events := eventsFromICS(t, body, anchor, anchor.AddDate(0, 0, 30))
+	require.Len(t, events, 1)
+	assert.Equal(t, time.Hour, events[0].End.Sub(events[0].Start))
+}
+
+// TestEventsFromCal_TitleWhitespaceCollapsed verifies escaped newlines and
+// runs of whitespace in SUMMARY render as single spaces.
+func TestEventsFromCal_TitleWhitespaceCollapsed(t *testing.T) {
+	t.Parallel()
+
+	body := "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:ws@test\r\n" +
+		`SUMMARY:  Line one\nLine two	 end ` + "\r\n" +
+		"DTSTART:20260602T100000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+	events := eventsFromICS(t, body, anchor, anchor.AddDate(0, 0, 30))
+	require.Len(t, events, 1)
+	assert.Equal(t, "Line one Line two end", events[0].Title)
+}
+
+// TestEventsFromCal_DTStartIsFirstInstance verifies DTSTART counts as an
+// occurrence (RFC 5545) for RDATE-only events and when DTSTART doesn't match
+// the RRULE, without duplicating it when it does match.
+func TestEventsFromCal_DTStartIsFirstInstance(t *testing.T) {
+	t.Parallel()
+
+	body := `BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+UID:rdate-only@test
+SUMMARY:RDATE only
+DTSTART:20260602T100000Z
+DTEND:20260602T110000Z
+RDATE:20260604T100000Z
+END:VEVENT
+BEGIN:VEVENT
+UID:mismatch@test
+SUMMARY:Mismatch
+DTSTART:20260602T100000Z
+DTEND:20260602T110000Z
+RRULE:FREQ=WEEKLY;BYDAY=TH;COUNT=2
+END:VEVENT
+BEGIN:VEVENT
+UID:match@test
+SUMMARY:Match
+DTSTART:20260602T100000Z
+DTEND:20260602T110000Z
+RRULE:FREQ=WEEKLY;COUNT=2
+END:VEVENT
+END:VCALENDAR`
+	events := eventsFromICS(t, body, anchor, anchor.AddDate(0, 0, 30))
+
+	dtstart := time.Date(2026, 6, 2, 10, 0, 0, 0, time.UTC)
+	for _, title := range []string{"RDATE only", "Mismatch"} {
+		found := false
+		for _, e := range events {
+			if e.Title == title && e.Start.Equal(dtstart) {
+				found = true
+			}
+		}
+		assert.True(t, found, "%s: DTSTART instance missing", title)
+	}
+	assert.Equal(t, 2, countTitle(events, "RDATE only"))
+	assert.Equal(t, 3, countTitle(events, "Mismatch"))
+	assert.Equal(t, 2, countTitle(events, "Match"))
+}
+
+// TestEventsFromCal_DropsMissingGlyphs verifies characters the embedded fonts
+// can't draw (emoji) are removed from titles, while ones they can are kept.
+func TestEventsFromCal_DropsMissingGlyphs(t *testing.T) {
+	t.Parallel()
+
+	body := `BEGIN:VCALENDAR
+VERSION:2.0
+BEGIN:VEVENT
+UID:emoji@test
+SUMMARY:🎂 Mom's birthday ☀
+DTSTART:20260602T100000Z
+END:VEVENT
+BEGIN:VEVENT
+UID:accent@test
+SUMMARY:Café ✓
+DTSTART:20260602T110000Z
+END:VEVENT
+BEGIN:VEVENT
+UID:only-emoji@test
+SUMMARY:🎉
+DTSTART:20260602T120000Z
+END:VEVENT
+END:VCALENDAR`
+	events := eventsFromICS(t, body, anchor, anchor.AddDate(0, 0, 30))
+	assert.ElementsMatch(t, []string{"Mom's birthday ☀", "Café ✓", "(no title)"}, eventTitles(events))
+}
+
+// TestEventsFromCal_SkipsDeclined verifies events the calendar owner (from
+// X-WR-CALNAME) declined are dropped, including a declined override of one
+// recurring instance, whose base slot must stay suppressed.
+func TestEventsFromCal_SkipsDeclined(t *testing.T) {
+	t.Parallel()
+
+	body := `BEGIN:VCALENDAR
+VERSION:2.0
+X-WR-CALNAME:me@example.com
+BEGIN:VEVENT
+UID:declined@test
+SUMMARY:Declined
+DTSTART:20260602T100000Z
+ATTENDEE;CN=me@example.com;PARTSTAT=DECLINED:MAILTO:Me@Example.com
+END:VEVENT
+BEGIN:VEVENT
+UID:other-declined@test
+SUMMARY:Someone else declined
+DTSTART:20260602T110000Z
+ATTENDEE;PARTSTAT=ACCEPTED:mailto:me@example.com
+ATTENDEE;PARTSTAT=DECLINED:mailto:bob@example.com
+END:VEVENT
+BEGIN:VEVENT
+UID:standup-decline@test
+SUMMARY:Weekly standup
+DTSTART:20260601T100000Z
+DTEND:20260601T103000Z
+RRULE:FREQ=WEEKLY;COUNT=3
+ATTENDEE;PARTSTAT=ACCEPTED:mailto:me@example.com
+END:VEVENT
+BEGIN:VEVENT
+UID:standup-decline@test
+SUMMARY:Weekly standup
+DTSTART:20260608T100000Z
+DTEND:20260608T103000Z
+RECURRENCE-ID:20260608T100000Z
+ATTENDEE;PARTSTAT=DECLINED:mailto:me@example.com
+END:VEVENT
+END:VCALENDAR`
+	events := eventsFromICS(t, body, anchor, anchor.AddDate(0, 0, 21))
+
+	titles := eventTitles(events)
+	assert.NotContains(t, titles, "Declined")
+	assert.Contains(t, titles, "Someone else declined")
+	assert.Equal(t, 2, countTitle(events, "Weekly standup"), "declined June 8 instance must not appear")
+}
+
+// TestEventsFromCal_DeclinedNeedsOwnerEmail verifies the declined filter is
+// off when X-WR-CALNAME isn't an email, since the owner is then unknown.
+func TestEventsFromCal_DeclinedNeedsOwnerEmail(t *testing.T) {
+	t.Parallel()
+
+	body := `BEGIN:VCALENDAR
+VERSION:2.0
+X-WR-CALNAME:Family
+BEGIN:VEVENT
+UID:declined@test
+SUMMARY:Declined
+DTSTART:20260602T100000Z
+ATTENDEE;PARTSTAT=DECLINED:mailto:Family
+END:VEVENT
+END:VCALENDAR`
+	events := eventsFromICS(t, body, anchor, anchor.AddDate(0, 0, 30))
+	assert.Equal(t, []string{"Declined"}, eventTitles(events))
 }

@@ -6,11 +6,8 @@ firmware/firebeetle_calendar/secrets.h
 # Per-user Claude Code overrides (shared settings.json stays tracked)
 .claude/settings.local.json
 
-# OAuth secrets — defaults from -creds and -token flags in server/cmd/server/main.go
-credentials.json
-token.json
+# Local secrets (never commit)
 .secrets/
-!server/internal/calendar/testdata/credentials.json
 
 # iCal secret env file — copy from deploy/calendar.env.example and chmod 600
 deploy/calendar.env

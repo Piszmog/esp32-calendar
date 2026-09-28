@@ -17,5 +17,36 @@ RestartSec=10
 StandardOutput=journal
 StandardError=journal
 
+# Sandboxing. The server only reads its binary and serves HTTP, so it needs
+# no writable paths and no capabilities. ProtectHome=read-only (not true)
+# because the binary lives under /home/server/calendar.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+CapabilityBoundingSet=
+ProtectClock=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectProc=invisible
+ProcSubset=pid
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+# Keep @resources: the Go runtime raises RLIMIT_NOFILE at startup. EPERM
+# (not SIGSYS) so any other filtered call fails instead of killing the process.
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+SystemCallErrorNumber=EPERM
+UMask=0077
+
 [Install]
 WantedBy=multi-user.target

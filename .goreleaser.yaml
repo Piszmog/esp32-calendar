@@ -44,6 +44,7 @@ archives:
       - README.md
       - DEVELOPMENT.md
       - firmware/firebeetle_calendar/firebeetle_calendar.ino
+      - firmware/firebeetle_calendar/calendar_logic.h
       - firmware/firebeetle_calendar/secrets.h.example
       - deploy/calendar.service
       - deploy/calendar.env.example

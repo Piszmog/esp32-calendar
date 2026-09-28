@@ -46,7 +46,7 @@ func TestHandler_Healthz(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	body, _ := io.ReadAll(resp.Body)
-	ok, _ := regexp.Match(`^ok\nlast_fetch_age=.+\nevents=\d+\nconsecutive_failures=0\nlast_error=\ndevice_last_seen_age=never\ndevice_battery=unknown\n$`, body)
+	ok, _ := regexp.Match(`^ok\nlast_fetch_age=[0-9hms]+\nevents=\d+\nconsecutive_failures=0\nlast_error=\ndevice_last_seen_age=never\ndevice_battery=unknown\n$`, body)
 	assert.True(t, ok, "healthz body should match expected format, got: %s", string(body))
 }
 

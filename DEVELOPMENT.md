@@ -18,10 +18,14 @@ esp32-calendar/
 │       ├── pack.go             pack1Bit: RGBA → 1-bit MSB-first 48000-byte buffer
 │       └── fonts/              Embedded TTFs (DejaVu Sans regular + bold)
 ├── firmware/
-│   └── firebeetle_calendar/
-│       └── firebeetle_calendar.ino   ESP32 sketch
+│   ├── firebeetle_calendar/
+│   │   ├── firebeetle_calendar.ino   ESP32 sketch
+│   │   └── calendar_logic.h          Pure wake-cycle logic (no Arduino headers)
+│   └── test/
+│       └── logic_test.cpp            Host unit tests for calendar_logic.h
 ├── deploy/
-│   └── calendar.service        systemd unit for the Pi
+│   ├── calendar.service        systemd unit for the Pi
+│   └── calendar.env.example    EnvironmentFile template (ICAL_URL, AUTH_TOKEN)
 ├── .goreleaser.yaml            Cross-compiled release config
 └── CLAUDE.md                   Agent-side invariants (source of truth for Claude)
 ```

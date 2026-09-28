@@ -80,10 +80,11 @@ curl -L -o calendar-display.tar.gz \
 tar -xzf calendar-display.tar.gz
 ```
 
-The tarball contains `calendar-server`, `README.md`,
+The tarball contains `calendar-server`, `README.md`, `DEVELOPMENT.md`,
 `firmware/firebeetle_calendar/firebeetle_calendar.ino`,
-`firmware/firebeetle_calendar/secrets.h.example`, and
-`deploy/calendar.service`.
+`firmware/firebeetle_calendar/calendar_logic.h`,
+`firmware/firebeetle_calendar/secrets.h.example`,
+`deploy/calendar.service`, and `deploy/calendar.env.example`.
 
 **Option B — Build locally.** Install
 [goreleaser](https://goreleaser.com/install/), then from the repo root:

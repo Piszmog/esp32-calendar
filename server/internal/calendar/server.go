@@ -465,5 +465,5 @@ func (s *server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 		battery = strconv.Itoa(deviceBat) + "%"
 	}
 	_, _ = fmt.Fprintf(w, "%s\nlast_fetch_age=%s\nevents=%d\nconsecutive_failures=%d\nlast_error=%s\ndevice_last_seen_age=%s\ndevice_battery=%s\n",
-		status, now.Sub(fetchedAt), n, failures, lastErr, deviceAge, battery)
+		status, now.Sub(fetchedAt).Round(time.Second), n, failures, lastErr, deviceAge, battery)
 }

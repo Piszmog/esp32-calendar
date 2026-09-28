@@ -232,6 +232,8 @@ bool fetchImage(uint8_t* buf, int batPct, int rssi, uint32_t* wakeAtMs,
             int n = s->readBytes(buf + got,
                                  min(avail, (size_t)(BUF_BYTES - got)));
             got += n;
+        } else if (!s->connected()) {
+            break;   // server closed early; the rest will never arrive
         } else {
             delay(1);
         }

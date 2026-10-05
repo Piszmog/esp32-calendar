@@ -1,0 +1,8 @@
+# Used by goreleaser's dockers_v2: the context holds prebuilt binaries at
+# $TARGETPLATFORM/calendar-server, not the source. See Dockerfile for a
+# from-source build.
+FROM gcr.io/distroless/static-debian12:nonroot
+ARG TARGETPLATFORM
+COPY $TARGETPLATFORM/calendar-server /calendar-server
+EXPOSE 8080
+ENTRYPOINT ["/calendar-server"]

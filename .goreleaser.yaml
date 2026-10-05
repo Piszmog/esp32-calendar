@@ -49,6 +49,24 @@ archives:
       - deploy/calendar.service
       - deploy/calendar.env.example
 
+dockers_v2:
+  - ids:
+      - calendar-server
+    dockerfile: Dockerfile.goreleaser
+    images:
+      - ghcr.io/piszmog/esp32-calendar
+    tags:
+      - "{{ .Version }}"
+      - latest
+    platforms:
+      - linux/amd64
+      - linux/arm64
+      - linux/arm/v7
+    labels:
+      org.opencontainers.image.source: https://github.com/Piszmog/esp32-calendar
+      org.opencontainers.image.version: "{{ .Version }}"
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+
 changelog:
   sort: asc
   filters:

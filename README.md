@@ -165,7 +165,14 @@ sudo systemctl enable --now calendar.service
 
 Instead of the systemd unit, you can run the server in a container. The image
 is distroless, so it supports `linux/amd64`, `linux/arm64` and `linux/arm/v7`
-only: there is no Pi Zero or Pi 1 (armv6). From the repo root:
+only: there is no Pi Zero or Pi 1 (armv6). Each release publishes an image:
+
+```bash
+docker pull ghcr.io/piszmog/esp32-calendar:latest
+docker tag ghcr.io/piszmog/esp32-calendar:latest calendar-server
+```
+
+Or build it yourself from the repo root:
 
 ```bash
 docker buildx build --platform linux/arm/v7 --build-arg VERSION=$(git describe --tags) \
@@ -302,7 +309,7 @@ curl -fsS http://esp32-calendar.local:8080/healthz
 `calendar-server.prev` is kept as a one-cycle rollback target. To roll back:
 swap `calendar-server` and `calendar-server.prev` and restart the service.
 
-With Docker, rebuild the image, then `docker rm -f calendar` and rerun the
+With Docker, pull (and re-tag) or rebuild the image, then `docker rm -f calendar` and rerun the
 `docker run` command from section 4.
 
 ### Update the firmware

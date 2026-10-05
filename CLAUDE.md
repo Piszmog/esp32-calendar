@@ -24,6 +24,7 @@ All commands run from `server/` unless noted.
 go build ./cmd/server                           # local binary
 GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 \
   go build -o calendar-server-armv7 ./cmd/server  # Pi cross-compile
+docker buildx build --platform linux/arm/v7 -t calendar-server .  # container image (from repo root; amd64/arm64/arm/v7 only)
 
 # Lint
 golangci-lint run                               # strict default: all config

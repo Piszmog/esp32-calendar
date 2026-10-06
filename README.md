@@ -62,12 +62,13 @@ Waveshare 7.5" V2 e-paper HAT → FireBeetle 2 ESP32-E:
 | DC      | 22 (SCL)         |
 | RST     | 21 (SDA)         |
 | BUSY    | 14 (D6)          |
-| PWR     | 3V3              |
+| PWR     | 26 (D3)          |
 
 The PWR pin only exists on the **rev 2.3** Driver HAT. Older rev 2.2 HATs don't
-have it — skip that row. For extra battery savings you can connect PWR to a spare
-GPIO instead of 3V3 and set `EPD_PWR` to that GPIO in the `.ino`; the firmware
-then powers the display only while drawing and holds PWR LOW during deep sleep.
+have it — skip that row and set `EPD_PWR` to `-1` in the `.ino`. With PWR on
+GPIO 26 (`EPD_PWR = 26`), the firmware powers the display only while drawing and
+holds PWR LOW during deep sleep. You can also tie PWR to 3V3 and set `EPD_PWR`
+to `-1`, at the cost of the HAT drawing power while the board sleeps.
 
 ## 3. Build the server
 

@@ -22,9 +22,9 @@
  *   DC    -> GPIO 22  (SCL)
  *   RST   -> GPIO 21  (SDA)
  *   BUSY  -> GPIO 14  (D6)
- *   PWR   -> 3V3  (rev 2.3 HAT only — older rev 2.2 has no PWR pin.
- *                  For max power savings, connect to a free GPIO instead
- *                  and set EPD_PWR below to it.)
+ *   PWR   -> GPIO 26 (D3)  (rev 2.3 HAT only — older rev 2.2 has no PWR pin;
+ *                  set EPD_PWR below to -1. Tying PWR to 3V3 with
+ *                  EPD_PWR = -1 also works but draws more in deep sleep.)
  */
 
 #include <WiFi.h>
@@ -50,7 +50,7 @@ const uint16_t SERVER_PORT = 8080;
 #define EPD_BUSY  14
 // GPIO wired to the HAT's PWR pin, or -1 when PWR is tied to 3V3. When set,
 // the display is powered only while drawing and PWR is held LOW in deep sleep.
-constexpr int8_t EPD_PWR = -1;
+constexpr int8_t EPD_PWR = 26;
 
 // FireBeetle 2 ESP32-E battery sensing
 // On the FireBeetle 2 ESP32-E the battery is monitored via GPIO34
@@ -260,6 +260,7 @@ void drawBuffer(const uint8_t* buf) {
         display.drawInvertedBitmap(0, 0, buf, IMG_W, IMG_H, GxEPD_BLACK);
     } while (display.nextPage());
     display.hibernate();
+    display.end();
     displayPower(false);
 }
 
@@ -282,6 +283,7 @@ void drawError(const char* title, const char* detail, const char* statusLine) {
         display.print(statusLine);
     } while (display.nextPage());
     display.hibernate();
+    display.end();
     displayPower(false);
 }
 

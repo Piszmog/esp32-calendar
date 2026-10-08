@@ -116,7 +116,7 @@ jobs:
           cache: false
       # --snapshot still builds the dockers_v2 images (without pushing).
       - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v7
         with:

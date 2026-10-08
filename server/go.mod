@@ -3,7 +3,7 @@ module calendar-display
 go 1.27.0
 
 require (
-	github.com/arran4/golang-ical v0.3.6
+	github.com/arran4/golang-ical v0.3.7
 	github.com/fogleman/gg v1.3.0
 	github.com/golang/freetype v0.0.0-20170609003504-e2365dfdc4a0
 	github.com/stretchr/testify v1.12.1
